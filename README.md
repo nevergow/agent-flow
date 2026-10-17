@@ -22,13 +22,24 @@ run history.
 | `TIMELINE / 7D` | every run as a band on a local 0–24h clock, coloured by worker |
 | `PROJECTS` | tokens, run count and share per workspace |
 | `DURATION` | recent runs by wall-clock length, green / amber / red by outcome |
-| `DELEGATION GRAPH` | orchestrator → worker → task nodes → workspace, one lane per dispatch |
+| `DELEGATION GRAPH` | orchestrator → worker → task nodes → workspace, one lane per dispatch; **hover a node to keep only its links lit**, click to pin, `Esc` to clear |
 | `NOW RUNNING` | the current task with its last tool calls, elapsed time, tokens, cost |
 | `RUN HISTORY` | every run: time, worker, project, task, state, tokens (12-cell bar), cost, duration |
 
 Refresh is a plain `<meta http-equiv="refresh">` — no JS framework, no build
 step, no network calls. The page is generated from scratch on every request, so
 what you see is always the state of the logs at that moment.
+
+### Reading the delegation graph
+
+- Hover any node — `HERMES`, a worker, a single task row, or a workspace — and
+  only its links stay lit; everything else fades to 12% opacity. On a busy day
+  this is the difference between a diagram and spaghetti.
+- Click a node to **pin** the focus; auto-refresh pauses while something is
+  pinned so the view does not jump out from under the pointer. `Esc` (or a click
+  on empty space) clears it.
+- `?focus=w:DSH` pins from the URL: `t:<key>` a task, `w:<worker>` a worker,
+  `p:<project>` a workspace. Useful for sharing a view or taking screenshots.
 
 ## Quick start
 

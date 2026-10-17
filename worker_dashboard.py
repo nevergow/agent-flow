@@ -725,40 +725,49 @@ def chart_network(recs, w=1040, h=560, n=12):
 
     out = [NET_MARK]
 
-    def curve(x1, y1, x2, y2, color, width=1.3):
+    def cd(x1, y1, x2, y2):
         dx = (x2 - x1) * 0.55
-        d = f"M{x1:.1f},{y1:.1f} C{x1 + dx:.1f},{y1:.1f} {x2 - dx:.1f},{y2:.1f} {x2:.1f},{y2:.1f}"
-        out.append(f'<path d="{d}" fill="none" stroke="{color}" stroke-width="{width}" marker-end="url(#arw)" opacity=".8"/>')
+        return (f"M{x1:.1f},{y1:.1f} C{x1 + dx:.1f},{y1:.1f} "
+                f"{x2 - dx:.1f},{y2:.1f} {x2:.1f},{y2:.1f}")
+
+    def edge(a, b, proj, d, color, width=1.3, dashed=False):
+        dash = ' stroke-dasharray="2 3"' if dashed else ''
+        out.append(f'<g class="eg" data-a="{e(a)}" data-b="{e(b)}" data-proj="{e(proj)}">'
+                   f'<path d="{d}" fill="none" stroke="{color}" stroke-width="{width}"{dash} '
+                   f'marker-end="url(#arw)" opacity=".85"/></g>')
 
     # HERMES → worker
     for wk in workers:
         col = PIX_DSH if wk == "DSH" else (PIX_PI if "rpc" not in wk else PIX_RPC)
-        curve(hub["x"] + hub["w"], hub["y"] + hub["h"] / 2, wx, wy[wk] + 14, col, 2.0)
+        edge("hermes", f"w:{wk}", "", cd(hub["x"] + hub["w"], hub["y"] + hub["h"] / 2, wx, wy[wk] + 14), col, 2.0)
 
     # worker → task
     for i, r in enumerate(items):
         col = PIX_DSH if r["worker"] == "DSH" else (PIX_PI if "rpc" not in r["worker"] else PIX_RPC)
-        curve(wx + ww, wy[r["worker"]] + 14, tx, ty[i] + 14, col)
+        edge(f"w:{r['worker']}", f"t:{r['key']}", r.get("project") or "?",
+             cd(wx + ww, wy[r["worker"]] + 14, tx, ty[i] + 14), col)
 
     # task → 项目：先汇到总线，再由总线进项目（避免 7 条虚线交叉）
     for pr in projs:
-        ys = sorted(py[pr] if isinstance(py[pr], list) else [py[pr]])
         ys = sorted(ty[i] + 14 for i, r in enumerate(items) if (r.get("project") or "?") == pr)
         lo, hi = min(ys), max(ys)
-        out.append(f'<path d="M{bus},{lo:.1f} L{bus},{hi:.1f}" stroke="#9E9682" stroke-width="1.6" opacity=".95"/>')
-        out.append(f'<path d="M{bus},{py[pr] + 14:.1f} L{px - 7},{py[pr] + 14:.1f}" stroke="#9E9682" stroke-width="1.4" '
-                   f'marker-end="url(#ar)" opacity=".9"/>')
+        out.append(f'<g class="eg busline" data-a="bus:{e(pr)}" data-b="p:{e(pr)}" data-proj="{e(pr)}">'
+                   f'<path d="M{bus},{lo:.1f} L{bus},{hi:.1f}" stroke="#9E9682" stroke-width="1.6" opacity=".95"/>'
+                   f'<path d="M{bus},{py[pr] + 14:.1f} L{px - 7},{py[pr] + 14:.1f}" stroke="#9E9682" '
+                   f'stroke-width="1.4" marker-end="url(#ar)" opacity=".9"/></g>')
 
     for i, r in enumerate(items):
         pr = r.get("project") or "?"
-        out.append(f'<path d="M{tx + tw},{ty[i] + 14:.1f} L{bus},{ty[i] + 14:.1f}" stroke="#C0B8A4" stroke-width="1" '
-                   f'stroke-dasharray="2 3" opacity=".9"/>')
+        edge(f"t:{r['key']}", f"bus:{pr}", pr,
+             f"M{tx + tw},{ty[i] + 14:.1f} L{bus},{ty[i] + 14:.1f}", "#C0B8A4", 1, dashed=True)
 
     # hub
-    out.append(f'<rect x="{hub["x"]}" y="{hub["y"]}" width="{hub["w"]}" height="{hub["h"]}" fill="#141519"/>')
-    out.append(_t(hub["x"] + hub["w"] / 2, hub["y"] + 19, "HERMES", 9, "#F2EEE3", "middle"))
-    out.append(_t(hub["x"] + hub["w"] / 2, hub["y"] - 8, "ORCHESTRATOR", 6.5, PIX_AXIS, "middle"))
-    out.append(_t(hub["x"] + hub["w"] / 2, hub["y"] + hub["h"] + 14, f"{len(recs)} RUNS", 6.5, PIX_AXIS, "middle"))
+    out.append(f'<g class="gn" data-nid="hermes">'
+               f'<rect x="{hub["x"]}" y="{hub["y"]}" width="{hub["w"]}" height="{hub["h"]}" fill="#141519"/>'
+               f'{_t(hub["x"] + hub["w"] / 2, hub["y"] + 19, "HERMES", 9, "#F2EEE3", "middle")}'
+               f'{_t(hub["x"] + hub["w"] / 2, hub["y"] - 8, "ORCHESTRATOR", 6.5, PIX_AXIS, "middle")}'
+               f'{_t(hub["x"] + hub["w"] / 2, hub["y"] + hub["h"] + 14, f"{len(recs)} RUNS", 6.5, PIX_AXIS, "middle")}'
+               f'</g>')
 
     # worker
     for wk in workers:
@@ -766,10 +775,12 @@ def chart_network(recs, w=1040, h=560, n=12):
         y = wy[wk]
         col = PIX_DSH if wk == "DSH" else (PIX_PI if "rpc" not in wk else PIX_RPC)
         tint = {"DSH": "#F0EBFA", "Pi": "#E4F1F2", "Pi·rpc": "#FBF0DE"}.get(wk, "#FFFCF3")
-        out.append(f'<rect x="{wx}" y="{y:.1f}" width="{ww}" height="28" fill="{tint}" stroke="{col}" stroke-width="2"/>')
-        out.append(f'<rect x="{wx}" y="{y:.1f}" width="5" height="28" fill="{col}"/>')
-        out.append(_t(wx + 12, y + 17.5, wk.upper(), 7.5, col))
-        out.append(_t(wx + ww - 6, y + 17.5, f"x{cnt}", 7, PIX_AXIS, "end"))
+        out.append(f'<g class="gn" data-nid="w:{e(wk)}">'
+                   f'<rect x="{wx}" y="{y:.1f}" width="{ww}" height="28" fill="{tint}" stroke="{col}" stroke-width="2"/>'
+                   f'<rect x="{wx}" y="{y:.1f}" width="5" height="28" fill="{col}"/>'
+                   f'{_t(wx + 12, y + 17.5, wk.upper(), 7.5, col)}'
+                   f'{_t(wx + ww - 6, y + 17.5, f"x{cnt}", 7, PIX_AXIS, "end")}'
+                   f'</g>')
 
     # task
     for i, r in enumerate(items):
@@ -778,31 +789,35 @@ def chart_network(recs, w=1040, h=560, n=12):
         label = _label_of(r)
         short = label if len(label) <= 26 else label[:25] + "…"
         tipx = f"{label} · {r['worker']} · {r['state']} · {human_tok(r.get('tokens'))} tok · {dur_text(r)} · {r['key']}"
-        out.append(f'<rect x="{tx}" y="{y:.1f}" width="{tw}" height="28" fill="#FFFFFF" stroke="#141519" stroke-width="1.1">'
-                   f'{_tip(tipx)}</rect>')
-        out.append(f'<rect x="{tx}" y="{y:.1f}" width="3.5" height="28" fill="{st_col}"/>')
-        out.append(f'<text x="{tx + 11}" y="{y + 13}" font-family="-apple-system,PingFang SC,sans-serif" font-size="10.5" fill="#23242A">{e(short)}</text>')
         st_txt = {"done": "DONE", "interrupted": "HALT", "aborted": "HALT", "FAILED": "FAIL"}.get(r["state"], "RUN")
         meta = f"{datetime.fromtimestamp(r['start'], TZ):%m/%d %H:%M} · {dur_text(r)} · {st_txt}"
-        out.append(_t(tx + 11, y + 23, meta, 6.2, "#6E7066"))
-        out.append(_t(tx + tw - 6, y + 13, human_tok(r.get('tokens')), 6, "#B0A894", "end"))
+        out.append(f'<g class="gn" data-nid="t:{e(r["key"])}">'
+                   f'<rect x="{tx}" y="{y:.1f}" width="{tw}" height="28" fill="#FFFFFF" stroke="#141519" stroke-width="1.1">'
+                   f'{_tip(tipx)}</rect>'
+                   f'<rect x="{tx}" y="{y:.1f}" width="3.5" height="28" fill="{st_col}"/>'
+                   f'<text x="{tx + 11}" y="{y + 13}" font-family="-apple-system,PingFang SC,sans-serif" font-size="10.5" fill="#23242A">{e(short)}</text>'
+                   f'{_t(tx + 11, y + 23, meta, 6.2, "#6E7066")}'
+                   f'{_t(tx + tw - 6, y + 13, human_tok(r.get("tokens")), 6, "#B0A894", "end")}'
+                   f'</g>')
 
     # project
     for pr in projs:
         y = py[pr]
         cnt = sum(1 for r in items if (r.get("project") or "?") == pr)
-        out.append(f'<rect x="{px}" y="{y:.1f}" width="{pw_}" height="28" fill="#EFEADA" stroke="#141519" stroke-width="1.1">'
-                   f'{_tip(f"{pr} · {cnt} runs")}</rect>')
-        out.append(f'<text x="{px + 9}" y="{y + 18}" font-family="-apple-system,PingFang SC,sans-serif" font-size="10" fill="#33342E">{e(pr[:26])}</text>')
-        out.append(_t(px + pw_ - 6, y + 18, f"x{cnt}", 6.5, PIX_AXIS, "end"))
+        out.append(f'<g class="gn" data-nid="p:{e(pr)}">'
+                   f'<rect x="{px}" y="{y:.1f}" width="{pw_}" height="28" fill="#EFEADA" stroke="#141519" stroke-width="1.1">'
+                   f'{_tip(f"{pr} · {cnt} runs")}</rect>'
+                   f'<text x="{px + 9}" y="{y + 18}" font-family="-apple-system,PingFang SC,sans-serif" font-size="10" fill="#33342E">{e(pr[:26])}</text>'
+                   f'{_t(px + pw_ - 6, y + 18, f"x{cnt}", 6.5, PIX_AXIS, "end")}'
+                   f'</g>')
 
     legend = ('<span><i style="background:%s"></i>DSH</span>'
               '<span><i style="background:%s"></i>Pi</span>'
               '<span><i style="background:%s"></i>Pi·rpc</span>'
               '<span><i style="background:%s"></i>DONE</span>'
               '<span><i style="background:%s"></i>HALT</span>'
-              '<span>竖线=同一项目汇聚 · 左→右=委派方向</span>') % (PIX_DSH, PIX_PI, PIX_RPC, PIX_OK, PIX_HALT)
-    svg = f'<svg viewBox="0 0 {w} {h}">{"".join(out)}</svg>'
+              '<span>竖线=同一项目汇聚 · 左→右=委派方向 · 悬停节点只看它的连接</span>') % (PIX_DSH, PIX_PI, PIX_RPC, PIX_OK, PIX_HALT)
+    svg = f'<svg class="net" viewBox="0 0 {w} {h}">{"".join(out)}</svg>'
     return _panel("DELEGATION GRAPH", f"RECENT {len(items)}", svg, legend)
 
 
@@ -814,6 +829,82 @@ def charts_html(recs):
     grid = (chart_daily(recs) + chart_gantt(recs) + chart_projects(recs) + chart_durations(recs))
     return f'<div class="grid2">{grid}</div>'
 
+
+
+NET_CSS = """
+svg.net .eg,svg.net .gn{transition:opacity .12s}
+svg.net .gn{cursor:pointer}
+svg.net.hasfocus .eg.dim,svg.net.hasfocus .gn.dim{opacity:.12}
+svg.net.hasfocus .eg.hl path{stroke-width:2.8}
+svg.net.hasfocus .gn.hl rect{stroke-width:3}
+"""
+
+NET_JS = """
+<script>
+(function(){
+  var svg = document.querySelector('svg.net');
+  if(!svg) return;
+  var edges = [].slice.call(svg.querySelectorAll('.eg'));
+  var nodes = [].slice.call(svg.querySelectorAll('.gn'));
+  var hovered = null, pinned = null;
+  var meta = document.querySelector('meta[http-equiv=refresh]');
+  var spec = meta ? meta.getAttribute('content') : null;
+  function pause(){ if(meta){ meta.parentNode.removeChild(meta); meta = null; } }
+  function resume(){
+    if(spec && !document.querySelector('meta[http-equiv=refresh]')){
+      var m = document.createElement('meta');
+      m.setAttribute('http-equiv','refresh'); m.setAttribute('content', spec);
+      document.head.appendChild(m); meta = m;
+    }
+  }
+  function related(id){
+    return edges.filter(function(g){
+      var a = g.getAttribute('data-a'), b = g.getAttribute('data-b'), pr = g.getAttribute('data-proj');
+      if(a === id || b === id) return true;
+      if(id.indexOf('p:') === 0 && pr === id.slice(2)) return true;          // 项目：它名下的所有派活
+      if(id.indexOf('t:') === 0 && pr && a === 'bus:' + pr) return true;     // 任务：连到它项目的那条总线
+      return false;
+    });
+  }
+  function apply(){
+    var id = hovered || pinned;
+    svg.classList.toggle('hasfocus', !!id);
+    if(!id){
+      edges.forEach(function(g){ g.classList.remove('hl','dim'); });
+      nodes.forEach(function(g){ g.classList.remove('hl','dim'); });
+      return;
+    }
+    var rel = related(id), keep = {};
+    keep[id] = 1;
+    rel.forEach(function(g){ keep[g.getAttribute('data-a')] = 1; keep[g.getAttribute('data-b')] = 1; });
+    edges.forEach(function(g){ var on = rel.indexOf(g) >= 0; g.classList.toggle('hl', on); g.classList.toggle('dim', !on); });
+    nodes.forEach(function(n){
+      var k = n.getAttribute('data-nid'), on = !!keep[k];
+      n.classList.toggle('hl', k === id);
+      n.classList.toggle('dim', !on);
+    });
+  }
+  svg.addEventListener('mouseover', function(ev){
+    var g = ev.target.closest && ev.target.closest('.gn');
+    var id = g ? g.getAttribute('data-nid') : null;
+    if(id !== hovered){ hovered = id; apply(); if(id) pause(); }
+  });
+  svg.addEventListener('mouseleave', function(){ hovered = null; apply(); if(!pinned) resume(); });
+  svg.addEventListener('click', function(ev){
+    var g = ev.target.closest && ev.target.closest('.gn');
+    var id = g ? g.getAttribute('data-nid') : null;
+    pinned = (id && pinned !== id) ? id : null;
+    apply();
+    if(pinned) pause(); else resume();
+  });
+  document.addEventListener('keydown', function(e){
+    if(e.key === 'Escape'){ pinned = null; hovered = null; apply(); resume(); }
+  });
+  var q = (location.search.match(/[?&]focus=([^&]+)/) || [])[1];
+  if(q){ pinned = decodeURIComponent(q); apply(); pause(); }
+})();
+</script>
+"""
 
 def render_pixel(recs, refresh):
     now = datetime.now(TZ)
@@ -829,7 +920,7 @@ def render_pixel(recs, refresh):
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>执行者看板 · PIXEL</title>
 {'<meta http-equiv="refresh" content="%d">' % refresh if refresh else ''}
-<style>{_font_css()}{CSS_PIXEL}</style></head><body><div class="wrap">"""
+<style>{_font_css()}{CSS_PIXEL}{NET_CSS}</style></head><body><div class="wrap">"""
 
     top = f"""
 <div class="top">
@@ -921,7 +1012,7 @@ def render_pixel(recs, refresh):
   <span class="px">SRC: ~/.dsh/sessions · ~/.pi/agent/sessions · ~/.hermes/logs/pi-rpc-*.jsonl</span>
   <span class="px">DETAIL: worker_runs.py show &lt;KEY&gt; · ¥ = EST. @ DEEPSEEK-FLASH</span>
 </div>
-</div></body></html>"""
+</div>{NET_JS}</body></html>"""
     return head + top + charts + live + table
 
 

@@ -922,8 +922,8 @@ def _qs(cur, **kw):
 
 
 def _ctl(cur, key, label, value, current):
-    on = " on" if str(current) == str(value) else ""
-    return f'<a class="on{on}" href="{_qs(cur, **{key: value})}">{label}</a>'
+    cls = ' class="on"' if str(current) == str(value) else ""
+    return f'<a{cls} href="{_qs(cur, **{key: value})}">{label}</a>'
 
 
 def processes_panel(procs, recs):

@@ -28,6 +28,7 @@ import glob
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import time
@@ -423,6 +424,8 @@ def scan_processes():
             agent, task = "Pi", ""
         elif "codex" in cmd and "app-server" not in cmd and "happy" not in cmd:
             agent, task = "Codex", ""
+        elif re.search(r"(^|\s)(claude|aider|gemini|opencode)(\s+-|\s*$)", cmd) and "grep" not in cmd and ".app/" not in cmd:
+            agent, task = os.path.basename(cmd.split()[0]), ""
         if not agent:
             continue
         cwd = _pid_cwd(pid)
@@ -431,6 +434,18 @@ def scan_processes():
                      "elapsed": etime, "cpu": cpu, "task": task})
     rows.sort(key=lambda r: -float(r["cpu"] or 0))
     return rows
+
+
+def hermes_pid():
+    """Hermes 网关进程的 PID（会话就是它跑的），找不到返回 None。"""
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return None
+    for line in out.splitlines():
+        if "hermes_cli.main" in line and "grep" not in line:
+            return int(line.strip().split(None, 1)[0])
+    return None
 
 
 def _pid_cwd(pid):
@@ -445,14 +460,193 @@ def _pid_cwd(pid):
     return ""
 
 
-def collect(workers):
+
+HERMES_DB = os.path.join(HOME, ".hermes", "state.db")
+CODEX_DIR = os.path.join(HOME, ".codex", "sessions")
+
+
+def scan_hermes(days=7, limit=40):
+    """Hermes 主循环会话（desktop / tui / cron）→ rec，token 与费用来自 session_model_usage。"""
+    cut = time.time() - days * 86400
+    out = []
+    try:
+        con = sqlite3.connect(f"file:{HERMES_DB}?mode=ro", uri=True)
+        con.row_factory = sqlite3.Row
+        rows = con.execute("""
+            select s.id, s.source, s.display_name, s.model, s.started_at, s.ended_at, s.end_reason,
+                   s.message_count,
+                   coalesce(sum(u.input_tokens), 0) tin,
+                   coalesce(sum(u.output_tokens), 0) tout,
+                   coalesce(sum(u.cache_read_tokens), 0) tcache,
+                   coalesce(sum(u.estimated_cost_usd), 0) usd,
+                   coalesce(sum(u.api_call_count), 0) calls,
+                   (select max(m.timestamp) from messages m where m.session_id = s.id) last_msg
+            from sessions s left join session_model_usage u on u.session_id = s.id
+            where s.started_at >= ?
+            group by s.id order by s.started_at desc limit ?""", (cut, limit)).fetchall()
+        con.close()
+    except Exception:
+        return out
+    now = time.time()
+    for r in rows:
+        last = r["last_msg"] or r["started_at"] or 0
+        live = r["ended_at"] is None and (now - last) < 180
+        state = "RUNNING" if live else ("interrupted" if (r["end_reason"] or "").startswith(("interrupt", "abort")) else "done")
+        label = (r["display_name"] or "").strip() or f'{r["source"]} session'
+        out.append({
+            "worker": "Hermes", "kind": "hermes", "key": r["id"], "path": "",
+            "state": state, "tokens": int(r["tin"]) + int(r["tout"]) + int(r["tcache"]),
+            "tok_in": int(r["tin"]), "tok_out": int(r["tout"]), "tok_cache": int(r["tcache"]),
+            "cost_usd": round(float(r["usd"]), 6), "title": label, "task": label, "label": label,
+            "project": f'hermes·{r["source"]}', "start": r["started_at"], "end": r["ended_at"] or 0.0,
+            "turns": int(r["message_count"] or 0), "steps": 0, "tools": {}, "tool_calls": [],
+            "last_text": "", "created": r["started_at"], "last": last, "last_start": last,
+            "model": r["model"],
+        })
+    return out
+
+
+def scan_hermes_subagents(days=7):
+    """Hermes 派出的子 agent（async_delegations）→ rec。"""
+    cut = time.time() - days * 86400
+    out = []
+    try:
+        con = sqlite3.connect(f"file:{HERMES_DB}?mode=ro", uri=True)
+        con.row_factory = sqlite3.Row
+        rows = con.execute("""
+            select delegation_id, state, dispatched_at, completed_at, task_json, result_json, owner_pid
+            from async_delegations where dispatched_at >= ? order by dispatched_at desc""", (cut,)).fetchall()
+        con.close()
+    except Exception:
+        return out
+    for r in rows:
+        tid = 0; tout = 0; usd = 0.0
+        try:
+            res = json.loads(r["result_json"] or "{}")
+            for it in res.get("results") or []:
+                tid += int(((it.get("tokens") or {}).get("input")) or 0)
+                tout += int(((it.get("tokens") or {}).get("output")) or 0)
+                usd += float(it.get("cost_usd") or 0)
+        except Exception:
+            pass
+        try:
+            goal = (json.loads(r["task_json"] or "{}").get("goal") or "").strip()
+        except Exception:
+            goal = ""
+        st = {"completed": "done", "failed": "FAILED", "running": "RUNNING",
+              "aborted": "interrupted", "cancelled": "interrupted"}.get(r["state"], "done")
+        out.append({
+            "worker": "Hermes·sub", "kind": "subagent", "key": r["delegation_id"], "path": "",
+            "state": st, "tokens": tid + tout, "tok_in": tid, "tok_out": tout, "tok_cache": 0,
+            "cost_usd": round(usd, 6), "title": goal[:120] or r["delegation_id"],
+            "task": goal, "label": goal[:120] or r["delegation_id"], "project": "hermes·sub",
+            "start": r["dispatched_at"], "end": r["completed_at"] or 0.0, "turns": 0, "steps": 0,
+            "tools": {}, "tool_calls": [], "last_text": "", "created": r["dispatched_at"],
+            "last": r["completed_at"] or r["dispatched_at"], "last_start": r["dispatched_at"],
+            "pid": r["owner_pid"],
+        })
+    return out
+
+
+def scan_codex(days=7):
+    """Codex CLI rollout（~/.codex/sessions/**/*.jsonl）→ rec，token 取累计值逐次差值。"""
+    cut = time.time() - days * 86400
+    out = []
+    for path in glob.glob(os.path.join(CODEX_DIR, "**", "*.jsonl"), recursive=True):
+        try:
+            if os.path.getmtime(path) < cut:
+                continue
+        except OSError:
+            continue
+        rec = {"cwd": "", "task": "", "start": 0.0, "end": 0.0, "tin": 0, "tout": 0, "tcache": 0,
+               "usd": 0.0, "last_text": ""}
+        prev = None
+        try:
+            fh = open(path, encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with fh:
+            for line in fh:
+                try:
+                    e = json.loads(line)
+                except Exception:
+                    continue
+                ts = (e.get("timestamp") or 0)
+                if isinstance(ts, str):
+                    try:
+                        ts = datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+                    except Exception:
+                        ts = 0
+                elif isinstance(ts, (int, float)) and ts > 1e12:
+                    ts = ts / 1000
+                pl = e.get("payload") or {}
+                t = e.get("type")
+                if t == "session_meta":
+                    rec["cwd"] = pl.get("cwd") or rec["cwd"]
+                    rec["start"] = rec["start"] or ts
+                elif t == "response_item" and pl.get("type") == "message":
+                    txt = " ".join(c.get("text", "") for c in (pl.get("content") or [])
+                                   if isinstance(c, dict)).strip()
+                    if pl.get("role") == "user" and not rec["task"] and not txt.startswith(
+                            ("<environment_context>", "<user_instructions>", "# AGENTS.md", "<permissions")):
+                        rec["task"] = txt[:400]
+                    elif pl.get("role") == "assistant" and txt:
+                        rec["last_text"] = txt[:400]
+                elif t == "event_msg" and pl.get("type") == "token_count":
+                    tot = (pl.get("info") or {}).get("total_token_usage") or {}
+                    cur = {k: int(tot.get(k) or 0) for k in ("input_tokens", "cached_input_tokens", "output_tokens")}
+                    d = dict(cur) if prev is None else {k: max(0, cur[k] - prev.get(k, 0)) for k in cur}
+                    prev = cur
+                    uncached = max(0, d["input_tokens"] - d["cached_input_tokens"])
+                    rec["tin"] += uncached; rec["tout"] += d["output_tokens"]; rec["tcache"] += d["cached_input_tokens"]
+                    rec["usd"] += uncached * 0.14e-6 + d["output_tokens"] * 4e-6 + d["cached_input_tokens"] * 0.014e-6
+                    rec["end"] = max(rec["end"], ts or 0)
+                elif t == "event_msg" and pl.get("type") == "task_started":
+                    rec["start"] = rec["start"] or ts
+        if not rec["start"]:
+            continue
+        key = os.path.basename(path).replace(".jsonl", "")[-12:]
+        label = (rec["task"] or "codex session")[:120]
+        out.append({
+            "worker": "Codex", "kind": "codex", "key": key, "path": path,
+            "state": "done" if rec["end"] else "RUNNING",
+            "tokens": rec["tin"] + rec["tout"] + rec["tcache"],
+            "tok_in": rec["tin"], "tok_out": rec["tout"], "tok_cache": rec["tcache"],
+            "cost_usd": round(rec["usd"], 6), "title": label, "task": rec["task"], "label": label,
+            "project": os.path.basename((rec["cwd"] or "?").rstrip("/")) or "?",
+            "start": rec["start"], "end": rec["end"], "turns": 0, "steps": 0,
+            "tools": {}, "tool_calls": [], "last_text": rec["last_text"],
+            "created": rec["start"], "last": rec["end"] or rec["start"],
+            "last_start": rec["end"] or rec["start"],
+        })
+    return out
+
+
+ALL_WORKERS = ["dsh", "pi", "hermes", "codex"]
+
+
+def collect(workers=None):
+    """汇总所有来源。各来源按自己的会话 id 独立记录，天然不重叠：
+    DSH 会话 / Pi 会话 / Pi RPC / Hermes 主循环 / Hermes 子 agent / Codex rollout。"""
+    workers = workers or ALL_WORKERS
     recs = []
     if "dsh" in workers:
         recs += scan_dsh()
     if "pi" in workers:
         recs += scan_pi_sessions() + scan_pi_rpc()
-    recs.sort(key=lambda r: r["start"], reverse=True)
-    return recs
+    if "hermes" in workers:
+        recs += scan_hermes() + scan_hermes_subagents()
+    if "codex" in workers:
+        recs += scan_codex()
+    seen, uniq = set(), []
+    for r in recs:
+        k = (r.get("kind"), r.get("key"))
+        if k in seen:
+            continue
+        seen.add(k)
+        uniq.append(r)
+    uniq.sort(key=lambda r: r["start"], reverse=True)
+    return uniq
 
 
 def _dur(rec):

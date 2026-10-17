@@ -410,6 +410,9 @@ tbody tr:hover{background:#FBF7EA}
 .b-dsh{color:var(--violet);background:var(--violet-soft)}
 .b-pi{color:var(--blue);background:#E8F1F6}
 .b-rpc{color:var(--amber);background:var(--amber-soft)}
+.b-hermes{color:#F2EEE3;background:#23242A}
+.b-sub{color:#B0472F;background:#F7E4DE}
+.b-codex{color:#157A5B;background:#DFF0E9}
 .pill{font-family:'PS2P',monospace;font-size:8px;padding:5px 7px 4px;border:1.5px solid currentColor;display:inline-block;white-space:nowrap}
 .p-run{color:var(--green);background:var(--green-soft)}
 .p-ok{color:var(--ink-2);background:#F1EEE4}
@@ -442,7 +445,20 @@ STATE_KEY = {"RUNNING": "st_run", "done": "st_done", "interrupted": "st_halt",
 
 def state_label(st):
     return T(STATE_KEY.get(st, "st_done"))
-PIXEL_WORKER = {"DSH": "b-dsh", "Pi": "b-pi", "Pi·rpc": "b-rpc"}
+PIXEL_WORKER = {"DSH": "b-dsh", "Pi": "b-pi", "Pi·rpc": "b-rpc",
+                "Hermes": "b-hermes", "Hermes·sub": "b-sub", "Codex": "b-codex"}
+PIX_HERMES = "#23242A"
+PIX_SUB = "#B0472F"
+PIX_CODEX = "#157A5B"
+
+
+def worker_color(w):
+    return {"DSH": PIX_DSH, "Pi": PIX_PI, "Pi·rpc": PIX_RPC,
+            "Hermes": PIX_HERMES, "Hermes·sub": PIX_SUB, "Codex": PIX_CODEX}.get(w, PIX_PI)
+
+
+def worker_badge(w):
+    return PIXEL_WORKER.get(w, "b-pi")
 WD = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
 WD_ZH = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
 
@@ -498,11 +514,11 @@ def _tok(v):
     return f"{v / 1e6:.1f}M"
 
 
-def _panel(title, hint, body, legend=""):
+def _panel(title, hint, body, legend="", ctl=""):
     return f"""
 <div class="panel">
   <div class="panel-h"><i class="sq" style="background:var(--violet);animation:none"></i>
-    <h2 class="px">{e(title)}</h2><div class="right"><span class="tag px">{e(hint)}</span></div></div>
+    <h2 class="px">{e(title)}</h2><div class="right">{ctl}<span class="tag px">{e(hint)}</span></div></div>
   {f'<div class="legend">{legend}</div>' if legend else ''}
   <div class="chart">{body}</div>
 </div>"""
@@ -563,7 +579,8 @@ def chart_daily(recs, days=14, w=520, h=200):
               f'<span><i style="background:%s"></i>{T("lg_output")}</span>'
               f'<span><i style="background:%s"></i>{T("cost_axis")}</span>') % (PIX_CACHE, PIX_IN, PIX_OUT, PIX_OK)
     svg = f'<svg viewBox="0 0 {w} {h}">{"".join(out)}</svg>'
-    return _panel(T("p_tokens", days), T("max_label", _tok(maxv)), svg, legend)
+    return _panel(T("p_tokens", days), T("max_label", _tok(maxv)), svg, legend,
+                  _ctl_grp("days", [(7, "7D"), (14, "14D"), (30, "30D")], days))
 
 
 def chart_gantt(recs, days=7, w=520, h=216):
@@ -590,7 +607,7 @@ def chart_gantt(recs, days=7, w=520, h=216):
             x0 = pl + pw * (st.hour * 3600 + st.minute * 60 + st.second) / 86400
             bw = max(3.0, pw * dur / 86400)
             x1 = min(x0 + bw, w - pr)
-            col = PIX_DSH if r["worker"] == "DSH" else (PIX_PI if "rpc" not in r["worker"] else PIX_RPC)
+            col = worker_color(r["worker"])
             op = 0.45 if r["state"] in ("interrupted", "aborted") else 1
             tip = f"{st:%m-%d %H:%M} → {datetime.fromtimestamp(end, TZ):%H:%M} · {r['worker']} · {clean_title(r.get('label'))[:40]} · {r['state']}"
             out.append(f'<rect x="{x0:.1f}" y="{y - 6:.1f}" width="{max(2.5, x1 - x0):.1f}" height="12" '
@@ -600,7 +617,8 @@ def chart_gantt(recs, days=7, w=520, h=216):
               '<span><i style="background:%s"></i>Pi·rpc</span>'
               '<span><i style="background:#B9B2A0"></i>' + T("dim_halt") + '</span>') % (PIX_DSH, PIX_PI, PIX_RPC)
     svg = f'<svg viewBox="0 0 {w} {h}">{"".join(out)}</svg>'
-    return _panel(T("p_timeline", days), T("h_timeline"), svg, legend)
+    return _panel(T("p_timeline", days), T("h_timeline"), svg, legend,
+                  _ctl_grp("tdays", [(7, "7D"), (14, "14D"), (30, "30D")], days))
 
 
 def chart_projects(recs, w=520, h=200, top=6):
@@ -635,7 +653,8 @@ def chart_projects(recs, w=520, h=200, top=6):
     if not items:
         out.append(_t(pl, pt + 14, "NO DATA", 8, PIX_AXIS))
     svg = f'<svg viewBox="0 0 {w} {h}">{"".join(out)}</svg>'
-    return _panel(T("p_projects"), T("h_projects"), svg)
+    return _panel(T("p_projects"), T("h_projects"), svg, "",
+                  _ctl_grp("projs", [(4, "4"), (6, "6"), (10, "10")], top))
 
 
 def chart_durations(recs, w=520, h=200, n=16):
@@ -707,7 +726,7 @@ def _label_of(r):
 def chart_network(recs, w=1040, h=560, n=12):
     items = list(reversed(recs[:n]))
     if not items:
-        return _panel("DELEGATION GRAPH", "NO DATA", "", "")
+        return _panel(T("p_graph"), T("no_data"), "", "")
     projs = []
     for r in items:
         pr = r.get("project") or "?"
@@ -737,51 +756,63 @@ def chart_network(recs, w=1040, h=560, n=12):
 
     out = [NET_MARK]
 
-    def curve(x1, y1, x2, y2, color, width=1.3):
+    def cd(x1, y1, x2, y2):
         dx = (x2 - x1) * 0.55
-        d = f"M{x1:.1f},{y1:.1f} C{x1 + dx:.1f},{y1:.1f} {x2 - dx:.1f},{y2:.1f} {x2:.1f},{y2:.1f}"
-        out.append(f'<path d="{d}" fill="none" stroke="{color}" stroke-width="{width}" marker-end="url(#arw)" opacity=".8"/>')
+        return (f"M{x1:.1f},{y1:.1f} C{x1 + dx:.1f},{y1:.1f} "
+                f"{x2 - dx:.1f},{y2:.1f} {x2:.1f},{y2:.1f}")
+
+    def edge(a, b, proj, d, color, width=1.3, dashed=False):
+        dash = ' stroke-dasharray="2 3"' if dashed else ''
+        out.append(f'<g class="eg" data-a="{e(a)}" data-b="{e(b)}" data-proj="{e(proj)}">'
+                   f'<path d="{d}" fill="none" stroke="{color}" stroke-width="{width}"{dash} '
+                   f'marker-end="url(#arw)" opacity=".85"/></g>')
 
     # HERMES → worker
     for wk in workers:
-        col = PIX_DSH if wk == "DSH" else (PIX_PI if "rpc" not in wk else PIX_RPC)
-        curve(hub["x"] + hub["w"], hub["y"] + hub["h"] / 2, wx, wy[wk] + 14, col, 2.0)
+        col = worker_color(wk)
+        edge("hermes", f"w:{wk}", "", cd(hub["x"] + hub["w"], hub["y"] + hub["h"] / 2, wx, wy[wk] + 14), col, 2.0)
 
     # worker → task
     for i, r in enumerate(items):
         col = PIX_DSH if r["worker"] == "DSH" else (PIX_PI if "rpc" not in r["worker"] else PIX_RPC)
-        curve(wx + ww, wy[r["worker"]] + 14, tx, ty[i] + 14, col)
+        edge(f"w:{r['worker']}", f"t:{r['key']}", r.get("project") or "?",
+             cd(wx + ww, wy[r["worker"]] + 14, tx, ty[i] + 14), col)
 
     # task → 项目：先汇到总线，再由总线进项目（避免 7 条虚线交叉）
     for pr in projs:
-        ys = sorted(py[pr] if isinstance(py[pr], list) else [py[pr]])
         ys = sorted(ty[i] + 14 for i, r in enumerate(items) if (r.get("project") or "?") == pr)
         lo, hi = min(ys), max(ys)
-        out.append(f'<path d="M{bus},{lo:.1f} L{bus},{hi:.1f}" stroke="#9E9682" stroke-width="1.6" opacity=".95"/>')
-        out.append(f'<path d="M{bus},{py[pr] + 14:.1f} L{px - 7},{py[pr] + 14:.1f}" stroke="#9E9682" stroke-width="1.4" '
-                   f'marker-end="url(#ar)" opacity=".9"/>')
+        out.append(f'<g class="eg busline" data-a="bus:{e(pr)}" data-b="p:{e(pr)}" data-proj="{e(pr)}">'
+                   f'<path d="M{bus},{lo:.1f} L{bus},{hi:.1f}" stroke="#9E9682" stroke-width="1.6" opacity=".95"/>'
+                   f'<path d="M{bus},{py[pr] + 14:.1f} L{px - 7},{py[pr] + 14:.1f}" stroke="#9E9682" '
+                   f'stroke-width="1.4" marker-end="url(#ar)" opacity=".9"/></g>')
 
     for i, r in enumerate(items):
         pr = r.get("project") or "?"
-        out.append(f'<path d="M{tx + tw},{ty[i] + 14:.1f} L{bus},{ty[i] + 14:.1f}" stroke="#C0B8A4" stroke-width="1" '
-                   f'stroke-dasharray="2 3" opacity=".9"/>')
+        edge(f"t:{r['key']}", f"bus:{pr}", pr,
+             f"M{tx + tw},{ty[i] + 14:.1f} L{bus},{ty[i] + 14:.1f}", "#C0B8A4", 1, dashed=True)
 
     # hub
-    out.append(f'<rect x="{hub["x"]}" y="{hub["y"]}" width="{hub["w"]}" height="{hub["h"]}" fill="#141519"/>')
-    out.append(_t(hub["x"] + hub["w"] / 2, hub["y"] + 19, "HERMES", 9, "#F2EEE3", "middle"))
-    out.append(_t(hub["x"] + hub["w"] / 2, hub["y"] - 8, T("orch"), 6.5, PIX_AXIS, "middle"))
-    out.append(_t(hub["x"] + hub["w"] / 2, hub["y"] + hub["h"] + 14, T("runs_tag", len(recs)), 6.5, PIX_AXIS, "middle"))
+    out.append(f'<g class="gn" data-nid="hermes">'
+               f'<rect x="{hub["x"]}" y="{hub["y"]}" width="{hub["w"]}" height="{hub["h"]}" fill="#141519"/>'
+               f'{_t(hub["x"] + hub["w"] / 2, hub["y"] + 19, "HERMES", 9, "#F2EEE3", "middle")}'
+               f'{_t(hub["x"] + hub["w"] / 2, hub["y"] - 8, "ORCHESTRATOR", 6.5, PIX_AXIS, "middle")}'
+               f'{_t(hub["x"] + hub["w"] / 2, hub["y"] + hub["h"] + 14, f"{len(recs)} RUNS", 6.5, PIX_AXIS, "middle")}'
+               f'</g>')
 
     # worker
     for wk in workers:
         cnt = sum(1 for r in items if r["worker"] == wk)
         y = wy[wk]
-        col = PIX_DSH if wk == "DSH" else (PIX_PI if "rpc" not in wk else PIX_RPC)
-        tint = {"DSH": "#F0EBFA", "Pi": "#E4F1F2", "Pi·rpc": "#FBF0DE"}.get(wk, "#FFFCF3")
-        out.append(f'<rect x="{wx}" y="{y:.1f}" width="{ww}" height="28" fill="{tint}" stroke="{col}" stroke-width="2"/>')
-        out.append(f'<rect x="{wx}" y="{y:.1f}" width="5" height="28" fill="{col}"/>')
-        out.append(_t(wx + 12, y + 17.5, wk.upper(), 7.5, col))
-        out.append(_t(wx + ww - 6, y + 17.5, f"x{cnt}", 7, PIX_AXIS, "end"))
+        col = worker_color(wk)
+        tint = {"DSH": "#F0EBFA", "Pi": "#E4F1F2", "Pi·rpc": "#FBF0DE",
+                "Hermes": "#E6E6E2", "Hermes·sub": "#F7E4DE", "Codex": "#DFF0E9"}.get(wk, "#FFFCF3")
+        out.append(f'<g class="gn" data-nid="w:{e(wk)}">'
+                   f'<rect x="{wx}" y="{y:.1f}" width="{ww}" height="28" fill="{tint}" stroke="{col}" stroke-width="2"/>'
+                   f'<rect x="{wx}" y="{y:.1f}" width="5" height="28" fill="{col}"/>'
+                   f'{_t(wx + 12, y + 17.5, wk.upper(), 7.5, col)}'
+                   f'{_t(wx + ww - 6, y + 17.5, f"x{cnt}", 7, PIX_AXIS, "end")}'
+                   f'</g>')
 
     # task
     for i, r in enumerate(items):
@@ -790,42 +821,46 @@ def chart_network(recs, w=1040, h=560, n=12):
         label = _label_of(r)
         short = label if len(label) <= 26 else label[:25] + "…"
         tipx = f"{label} · {r['worker']} · {r['state']} · {human_tok(r.get('tokens'))} tok · {dur_text(r)} · {r['key']}"
-        out.append(f'<rect x="{tx}" y="{y:.1f}" width="{tw}" height="28" fill="#FFFFFF" stroke="#141519" stroke-width="1.1">'
-                   f'{_tip(tipx)}</rect>')
-        out.append(f'<rect x="{tx}" y="{y:.1f}" width="3.5" height="28" fill="{st_col}"/>')
-        out.append(f'<text x="{tx + 11}" y="{y + 13}" font-family="-apple-system,PingFang SC,sans-serif" font-size="10.5" fill="#23242A">{e(short)}</text>')
         st_txt = state_label(r["state"])
         meta = f"{datetime.fromtimestamp(r['start'], TZ):%m/%d %H:%M} · {dur_text(r)} · {st_txt}"
-        out.append(_t(tx + 11, y + 23, meta, 6.2, "#6E7066"))
-        out.append(_t(tx + tw - 6, y + 13, human_tok(r.get('tokens')), 6, "#B0A894", "end"))
+        out.append(f'<g class="gn" data-nid="t:{e(r["key"])}">'
+                   f'<rect x="{tx}" y="{y:.1f}" width="{tw}" height="28" fill="#FFFFFF" stroke="#141519" stroke-width="1.1">'
+                   f'{_tip(tipx)}</rect>'
+                   f'<rect x="{tx}" y="{y:.1f}" width="3.5" height="28" fill="{st_col}"/>'
+                   f'<text x="{tx + 11}" y="{y + 13}" font-family="-apple-system,PingFang SC,sans-serif" font-size="10.5" fill="#23242A">{e(short)}</text>'
+                   f'{_t(tx + 11, y + 23, meta, 6.2, "#6E7066")}'
+                   f'{_t(tx + tw - 6, y + 13, human_tok(r.get("tokens")), 6, "#B0A894", "end")}'
+                   f'</g>')
 
     # project
     for pr in projs:
         y = py[pr]
         cnt = sum(1 for r in items if (r.get("project") or "?") == pr)
-        out.append(f'<rect x="{px}" y="{y:.1f}" width="{pw_}" height="28" fill="#EFEADA" stroke="#141519" stroke-width="1.1">'
-                   f'{_tip(f"{pr} · {cnt} runs")}</rect>')
-        out.append(f'<text x="{px + 9}" y="{y + 18}" font-family="-apple-system,PingFang SC,sans-serif" font-size="10" fill="#33342E">{e(pr[:26])}</text>')
-        out.append(_t(px + pw_ - 6, y + 18, f"x{cnt}", 6.5, PIX_AXIS, "end"))
+        out.append(f'<g class="gn" data-nid="p:{e(pr)}">'
+                   f'<rect x="{px}" y="{y:.1f}" width="{pw_}" height="28" fill="#EFEADA" stroke="#141519" stroke-width="1.1">'
+                   f'{_tip(f"{pr} · {cnt} runs")}</rect>'
+                   f'<text x="{px + 9}" y="{y + 18}" font-family="-apple-system,PingFang SC,sans-serif" font-size="10" fill="#33342E">{e(pr[:26])}</text>'
+                   f'{_t(px + pw_ - 6, y + 18, f"x{cnt}", 6.5, PIX_AXIS, "end")}'
+                   f'</g>')
 
     legend = ('<span><i style="background:%s"></i>DSH</span>'
               '<span><i style="background:%s"></i>Pi</span>'
               '<span><i style="background:%s"></i>Pi·rpc</span>'
-              '<span><i style="background:%s"></i>' + T("st_done") + '</span>'
-              '<span><i style="background:%s"></i>' + T("st_halt") + '</span>'
-              '<span>' + T("bus") + '</span>') % (PIX_DSH, PIX_PI, PIX_RPC, PIX_OK, PIX_HALT)
-    svg = f'<svg viewBox="0 0 {w} {h}">{"".join(out)}</svg>'
-    return _panel(T("p_graph"), T("h_graph", len(items)), svg, legend)
-
+              '<span><i style="background:%s"></i>DONE</span>'
+              '<span><i style="background:%s"></i>HALT</span>'
+              '<span>竖线=同一项目汇聚 · 左→右=委派方向 · 悬停节点只看它的连接</span>') % (PIX_DSH, PIX_PI, PIX_RPC, PIX_OK, PIX_HALT)
+    svg = f'<svg class="net" viewBox="0 0 {w} {h}">{"".join(out)}</svg>'
+    return _panel(T("p_graph"), T("h_graph", len(items)), svg, legend,
+                  _ctl_grp("graph", [(6, "6"), (12, "12"), (24, "24")], n))
 
 def network_block(recs, graph_n=12):
     return f'<div class="grid1">{chart_network(recs, n=graph_n)}</div>'
 
 
-def charts_html(recs, days=14, graph_n=12, procs=None):
+def charts_html(recs, days=14, graph_n=12, procs=None, tdays=7, projs=6):
     last = chart_durations(recs) if procs is None else processes_panel(procs, recs)
-    grid = (chart_daily(recs, days=days) + chart_gantt(recs, days=min(days, 14)) +
-            chart_projects(recs) + last)
+    grid = (chart_daily(recs, days=days) + chart_gantt(recs, days=tdays) +
+            chart_projects(recs, top=projs) + last)
     return f'<div class="grid2">{grid}</div>'
 
 
@@ -904,6 +939,14 @@ def T(key, *args):
 
 
 CTL_CSS = """
+.lang-sw{margin-top:9px;display:flex;align-items:center;justify-content:flex-end}
+.lang-sw .pctl a{padding:4px 8px;font-size:8.5px}
+.panel-h .right{display:flex;align-items:center;gap:8px}
+.pctl{display:inline-flex;gap:3px;align-items:center}
+.pctl a{border:1.5px solid #141519;background:#FBF8EE;color:#141519;padding:2px 5px;
+        text-decoration:none;font-family:'PS2P',monospace;font-size:7px;box-shadow:1.5px 1.5px 0 #141519}
+.pctl a.on{background:#141519;color:#FBF8EE}
+.pctl a:hover{transform:translate(-1px,-1px);box-shadow:2.5px 2.5px 0 #141519}
 .ctl{display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin:10px 0 4px;
      font-family:'PS2P',monospace;font-size:8px;color:var(--ink-3)}
 .ctl .grp{display:flex;gap:6px;align-items:center}
@@ -914,16 +957,100 @@ CTL_CSS = """
 .ctl a:hover{transform:translate(-1px,-1px);box-shadow:3px 3px 0 #141519}
 """
 
+NET_CSS = """
+svg.net .eg,svg.net .gn{transition:opacity .12s}
+svg.net .gn{cursor:pointer}
+svg.net.hasfocus .eg.dim,svg.net.hasfocus .gn.dim{opacity:.12}
+svg.net.hasfocus .eg.hl path{stroke-width:2.8}
+svg.net.hasfocus .gn.hl rect{stroke-width:3}
+"""
 
-def _qs(cur, **kw):
-    d = dict(cur)
+NET_JS = """
+<script>
+(function(){
+  var svg = document.querySelector('svg.net');
+  if(!svg) return;
+  var edges = [].slice.call(svg.querySelectorAll('.eg'));
+  var nodes = [].slice.call(svg.querySelectorAll('.gn'));
+  var hovered = null, pinned = null;
+  var meta = document.querySelector('meta[http-equiv=refresh]');
+  var spec = meta ? meta.getAttribute('content') : null;
+  function pause(){ if(meta){ meta.parentNode.removeChild(meta); meta = null; } }
+  function resume(){
+    if(spec && !document.querySelector('meta[http-equiv=refresh]')){
+      var m = document.createElement('meta');
+      m.setAttribute('http-equiv','refresh'); m.setAttribute('content', spec);
+      document.head.appendChild(m); meta = m;
+    }
+  }
+  function related(id){
+    return edges.filter(function(g){
+      var a = g.getAttribute('data-a'), b = g.getAttribute('data-b'), pr = g.getAttribute('data-proj');
+      if(a === id || b === id) return true;
+      if(id.indexOf('p:') === 0 && pr === id.slice(2)) return true;          // 项目：它名下的所有派活
+      if(id.indexOf('t:') === 0 && pr && a === 'bus:' + pr) return true;     // 任务：连到它项目的那条总线
+      return false;
+    });
+  }
+  function apply(){
+    var id = hovered || pinned;
+    svg.classList.toggle('hasfocus', !!id);
+    if(!id){
+      edges.forEach(function(g){ g.classList.remove('hl','dim'); });
+      nodes.forEach(function(g){ g.classList.remove('hl','dim'); });
+      return;
+    }
+    var rel = related(id), keep = {};
+    keep[id] = 1;
+    rel.forEach(function(g){ keep[g.getAttribute('data-a')] = 1; keep[g.getAttribute('data-b')] = 1; });
+    edges.forEach(function(g){ var on = rel.indexOf(g) >= 0; g.classList.toggle('hl', on); g.classList.toggle('dim', !on); });
+    nodes.forEach(function(n){
+      var k = n.getAttribute('data-nid'), on = !!keep[k];
+      n.classList.toggle('hl', k === id);
+      n.classList.toggle('dim', !on);
+    });
+  }
+  svg.addEventListener('mouseover', function(ev){
+    var g = ev.target.closest && ev.target.closest('.gn');
+    var id = g ? g.getAttribute('data-nid') : null;
+    if(id !== hovered){ hovered = id; apply(); if(id) pause(); }
+  });
+  svg.addEventListener('mouseleave', function(){ hovered = null; apply(); if(!pinned) resume(); });
+  svg.addEventListener('click', function(ev){
+    var g = ev.target.closest && ev.target.closest('.gn');
+    var id = g ? g.getAttribute('data-nid') : null;
+    pinned = (id && pinned !== id) ? id : null;
+    apply();
+    if(pinned) pause(); else resume();
+  });
+  document.addEventListener('keydown', function(e){
+    if(e.key === 'Escape'){ pinned = null; hovered = null; apply(); resume(); }
+  });
+  var q = (location.search.match(/[?&]focus=([^&]+)/) || [])[1];
+  if(q){ pinned = decodeURIComponent(q); apply(); pause(); }
+})();
+</script>
+"""
+
+
+
+CUR = {}
+
+
+def _qs(**kw):
+    d = dict(CUR)
     d.update({k: str(v) for k, v in kw.items()})
     return "?" + urlencode(d)
 
 
-def _ctl(cur, key, label, value, current):
+def _ctl(key, label, value, current):
     cls = ' class="on"' if str(current) == str(value) else ""
-    return f'<a{cls} href="{_qs(cur, **{key: value})}">{label}</a>'
+    return f'<a{cls} href="{_qs(**{key: value})}">{label}</a>'
+
+
+def _ctl_grp(key, pairs, current):
+    return ('<span class="pctl">' +
+            ''.join(_ctl(key, lb, v, current) for v, lb in pairs) + '</span>')
 
 
 def processes_panel(procs, recs):
@@ -932,6 +1059,17 @@ def processes_panel(procs, recs):
     for r in recs:
         if r.get("state") == "RUNNING":
             by_proj.setdefault(r.get("project"), r)
+    have = {(pr["agent"], pr["project"]) for pr in procs}
+    for r in recs:
+        if r.get("state") != "RUNNING":
+            continue
+        w = r.get("worker")
+        if w in ("DSH", "Pi", "Pi·rpc", "Codex") and any(a == w for a, _ in have):
+            continue
+        pid = r.get("pid") or (W.hermes_pid() if w == "Hermes" else None) or "—"
+        procs = procs + [{"pid": pid, "agent": w, "cwd": "",
+                          "project": r.get("project") or "?", "elapsed": dur_lcd(r),
+                          "cpu": "—", "task": clean_title(r.get("label"))}]
     for pr in procs[:8]:
         rec = by_proj.get(pr["project"])
         task = (clean_title(rec.get("label")) if rec else (pr.get("task") or "—"))
@@ -956,9 +1094,12 @@ def processes_panel(procs, recs):
 </div>"""
 
 
-def render_pixel(recs, refresh, lang="zh", days=14, rows=20, graph_n=12, procs=None, cur=None):
+def render_pixel(recs, refresh, lang="zh", days=14, rows=20, graph_n=12, procs=None, cur=None,
+                 tdays=7, projs=6):
     LANG["v"] = "en" if lang == "en" else "zh"
-    cur = cur or {"lang": lang, "days": days, "rows": rows, "graph": graph_n}
+    cur = cur or {"lang": lang, "days": days, "rows": rows, "graph": graph_n,
+                  "tdays": tdays, "projs": projs}
+    CUR.clear(); CUR.update(cur)
     procs = procs or []
     row_limit = int(rows)
     now = datetime.now(TZ)
@@ -974,7 +1115,7 @@ def render_pixel(recs, refresh, lang="zh", days=14, rows=20, graph_n=12, procs=N
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{T("board_title")} · PIXEL</title>
 {'<meta http-equiv="refresh" content="%d">' % refresh if refresh else ''}
-<style>{_font_css()}{CSS_PIXEL}{CTL_CSS}</style></head><body><div class="wrap">"""
+<style>{_font_css()}{CSS_PIXEL}{CTL_CSS}{NET_CSS}</style></head><body><div class="wrap">"""
 
     top = f"""
 <div class="top">
@@ -987,14 +1128,8 @@ def render_pixel(recs, refresh, lang="zh", days=14, rows=20, graph_n=12, procs=N
     <div class="lbl px">{T("local_time")}</div>
     <div class="lcd"><div class="t px">{now:%H:%M:%S}</div></div>
     <div class="d px"><span>{now:%m-%d} {weekday_label(now.weekday())}</span><span>{T("sync")} <i class="blink"></i></span></div>
+    <div class="lang-sw"><span class="lbl px" style="margin-right:6px">{T("lang")}</span>{_ctl_grp("lang", [("zh", "中文"), ("en", "EN")], lang)}</div>
   </div>
-</div>
-
-<div class="ctl">
-  <span class="grp"><b>{T("range")}</b>{_ctl(cur, 'days', '7D', 7, days)}{_ctl(cur, 'days', '14D', 14, days)}{_ctl(cur, 'days', '30D', 30, days)}</span>
-  <span class="grp"><b>{T("rows")}</b>{_ctl(cur, 'rows', '20', 20, rows)}{_ctl(cur, 'rows', '50', 50, rows)}{_ctl(cur, 'rows', '100', 100, rows)}</span>
-  <span class="grp"><b>{T("graph")}</b>{_ctl(cur, 'graph', '6', 6, graph_n)}{_ctl(cur, 'graph', '12', 12, graph_n)}{_ctl(cur, 'graph', '24', 24, graph_n)}</span>
-  <span class="grp"><b>{T("lang")}</b>{_ctl(cur, 'lang', '中文', 'zh', lang)}{_ctl(cur, 'lang', 'EN', 'en', lang)}</span>
 </div>
 
 <div class="stats">
@@ -1016,7 +1151,7 @@ def render_pixel(recs, refresh, lang="zh", days=14, rows=20, graph_n=12, procs=N
   </div>
 </div>"""
 
-    charts = charts_html(recs, days, graph_n, procs) + network_block(recs, graph_n)
+    charts = charts_html(recs, days, graph_n, procs, tdays, projs) + network_block(recs, graph_n)
 
     live = ""
     if running:
@@ -1049,7 +1184,7 @@ def render_pixel(recs, refresh, lang="zh", days=14, rows=20, graph_n=12, procs=N
         pct = int(100 * (r.get("tokens") or 0) / maxtok)
         rows.append(f"""<tr>
   <td class="t">{datetime.fromtimestamp(r['start'], TZ):%m-%d %H:%M}</td>
-  <td><span class="badge {PIXEL_WORKER.get(w, 'b-pi')}">{e(w.upper())}</span></td>
+  <td><span class="badge {worker_badge(w)}">{e(w.upper())}</span></td>
   <td><span class="proj" title="{e(r.get('project'))}">{e(r.get('project'))}</span></td>
   <td><span class="taskcell" title="{e(clean_title(r.get('label')))} · {e(r['key'])}">{e(clean_title(r.get('label')))}</span></td>
   <td><span class="pill {cls}">{e(label)}</span></td>
@@ -1062,7 +1197,7 @@ def render_pixel(recs, refresh, lang="zh", days=14, rows=20, graph_n=12, procs=N
     table = f"""
 <div class="panel">
   <div class="panel-h"><i class="sq" style="background:var(--violet);animation:none"></i><h2 class="px">{T("p_hist")}</h2>
-    <div class="right"><span class="tag px">{T("records", len(recs))}</span></div></div>
+    <div class="right">{_ctl_grp("rows", [(20, "20"), (50, "50"), (100, "100")], row_limit)}<span class="tag px">{T("records", len(recs))}</span></div></div>
   <table>
     <colgroup><col style="width:104px"><col style="width:76px"><col style="width:146px"><col><col style="width:92px"><col style="width:150px"><col style="width:84px"><col style="width:82px"></colgroup>
     <thead><tr><th>{T("th_time")}</th><th>{T("th_worker")}</th><th>{T("th_project")}</th><th>{T("th_task")}</th><th>{T("th_state")}</th><th>{T("th_tokens")}</th><th>{T("th_cost")}</th><th>{T("th_dur")}</th></tr></thead>
@@ -1074,7 +1209,7 @@ def render_pixel(recs, refresh, lang="zh", days=14, rows=20, graph_n=12, procs=N
   <span class="px">SRC: ~/.dsh/sessions · ~/.pi/agent/sessions · ~/.hermes/logs/pi-rpc-*.jsonl</span>
   <span class="px">{T("foot_detail")}</span>
 </div>
-</div></body></html>"""
+</div>{NET_JS}</body></html>"""
     return head + top + charts + live + table
 
 
@@ -1139,6 +1274,26 @@ def demo_recs(lang="zh"):
                 rec["cost_usd"] = round(tin / 1e6 * 0.14 + tout * 4e-6, 4)
             out.append(rec)
             seq += 1
+    # 补几条 Hermes / 子 agent / Codex，让演示里六种执行者都出现
+    extra = [
+        ("Hermes", "hermes", "desktop session · 修 dashboard", "hermes·desktop", 3),
+        ("Hermes", "hermes", "cron · 汇率播报", "hermes·cron", 40),
+        ("Hermes·sub", "subagent", "把 README 翻成英文", "hermes·sub", 55),
+        ("Hermes·sub", "subagent", "排查 CI 里的 flaky 测试", "hermes·sub", 90),
+        ("Codex", "codex", "review the patch", "my-app", 120),
+    ]
+    for idx, (worker, kind, label, proj, back) in enumerate(extra):
+        st = now - back * 60
+        dur = [1500, 90, 300, 600, 420][idx]
+        tin, tout, tc = 40000 + idx * 9000, 8000 + idx * 500, 300000 + idx * 50000
+        out.append({
+            "worker": worker, "kind": kind, "key": f"demo-{kind}-{idx}", "path": "",
+            "state": "done", "tokens": tin + tout + tc, "tok_in": tin, "tok_out": tout, "tok_cache": tc,
+            "cost_usd": round(tin * 0.14e-6 + tout * 4e-6 + tc * 0.014e-6, 5),
+            "title": label, "task": label, "label": label, "project": proj,
+            "start": st, "end": st + dur, "turns": 6, "steps": 0, "tools": {}, "tool_calls": [],
+            "last_text": "", "created": st, "last": st + dur, "last_start": st + dur,
+        })
     out.sort(key=lambda r: r["start"], reverse=True)
     return out
 
@@ -1150,10 +1305,13 @@ def demo_procs(lang="zh"):
          "elapsed": "07:42", "cpu": "3.1", "task": t[0]},
         {"pid": 48390, "agent": "Pi·rpc", "cwd": "/Users/you/code/api-service", "project": "api-service",
          "elapsed": "1:12:08", "cpu": "0.4", "task": ""},
+        {"pid": 48402, "agent": "Hermes", "cwd": "/Users/you/code/my-app", "project": "hermes·desktop",
+         "elapsed": "38:12", "cpu": "1.7", "task": "修 dashboard 的交互"},
     ]
 
 
-def serve(port, style, refresh, demo, lang="zh", days=14, rows=20, graph_n=12):
+def serve(port, style, refresh, demo, lang="zh", days=14, rows=20, graph_n=12,
+          tdays=7, projs=6):
     """小 HTTP 服务：每次请求重新采集并渲染；页面自带 meta refresh 自动刷新。
 
     查询参数：?lang=zh|en &days=7|14|30 &rows=20|50|100 &graph=6|12|24
@@ -1178,18 +1336,22 @@ def serve(port, style, refresh, demo, lang="zh", days=14, rows=20, graph_n=12):
             want_days = int(pick("days", [7, 14, 30], days))
             want_rows = int(pick("rows", [20, 50, 100], rows))
             want_graph = int(pick("graph", [6, 12, 24], graph_n))
+            want_tdays = int(pick("tdays", [7, 14, 30], tdays))
+            want_projs = int(pick("projs", [4, 6, 10], projs))
             want_style = "clean" if "style=clean" in self.path else style
-            key = (want_style, want_lang, want_days, want_rows, want_graph)
+            key = (want_style, want_lang, want_days, want_rows, want_graph, want_tdays, want_projs)
             ent = memo.get(key)
             if not ent or time.time() - ent[0] > 2:
-                recs = demo_recs(want_lang) if demo else W.collect(["dsh", "pi"])
+                recs = demo_recs(want_lang) if demo else W.collect()
                 procs = demo_procs(want_lang) if demo else W.scan_processes()
-                cur = {"lang": want_lang, "days": want_days, "rows": want_rows, "graph": want_graph}
+                cur = {"lang": want_lang, "days": want_days, "rows": want_rows, "graph": want_graph,
+                       "tdays": want_tdays, "projs": want_projs}
                 if want_style == "clean":
                     doc = render(recs, refresh)
                 else:
                     doc = render_pixel(recs, refresh, lang=want_lang, days=want_days,
-                                       rows=want_rows, graph_n=want_graph, procs=procs, cur=cur)
+                                       rows=want_rows, graph_n=want_graph, procs=procs, cur=cur,
+                                       tdays=want_tdays, projs=want_projs)
                 ent = (time.time(), doc.encode("utf-8"))
                 memo[key] = ent
             body = ent[1]
@@ -1226,19 +1388,23 @@ def main():
     ap.add_argument("--days", type=int, choices=[7, 14, 30], default=14, help="图表时间范围")
     ap.add_argument("--rows", type=int, choices=[20, 50, 100], default=20, help="流水表行数")
     ap.add_argument("--graph", type=int, choices=[6, 12, 24], default=12, help="拓扑里显示多少个任务")
+    ap.add_argument("--tdays", type=int, choices=[7, 14, 30], default=7, help="时间线天数")
+    ap.add_argument("--projs", type=int, choices=[4, 6, 10], default=6, help="项目图显示几个")
     args = ap.parse_args()
 
     if args.serve:
         return serve(args.serve, args.style, 0 if args.no_refresh else args.refresh, args.demo,
-                     lang=args.lang, days=args.days, rows=args.rows, graph_n=args.graph)
+                     lang=args.lang, days=args.days, rows=args.rows, graph_n=args.graph,
+                     tdays=args.tdays, projs=args.projs)
 
-    recs = demo_recs(args.lang) if args.demo else W.collect(["dsh", "pi"])
+    recs = demo_recs(args.lang) if args.demo else W.collect()
     refresh = 0 if args.no_refresh else args.refresh
     if args.style == "pixel":
         procs = demo_procs(args.lang) if args.demo else W.scan_processes()
         doc = render_pixel(recs, refresh, lang=args.lang, days=args.days, rows=args.rows,
-                           graph_n=args.graph, procs=procs,
-                           cur={"lang": args.lang, "days": args.days, "rows": args.rows, "graph": args.graph})
+                           graph_n=args.graph, procs=procs, tdays=args.tdays, projs=args.projs,
+                           cur={"lang": args.lang, "days": args.days, "rows": args.rows,
+                                "graph": args.graph, "tdays": args.tdays, "projs": args.projs})
         out = args.out or PIXEL_CACHE
     else:
         doc = render(recs, refresh)

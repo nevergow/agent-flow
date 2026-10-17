@@ -23,9 +23,16 @@
 | `NOW RUNNING` | 当前任务 + 最近几次工具调用 + 已运行时长 + token + 花费 |
 | `RUN HISTORY` | 全部流水：时间 / 执行者 / 项目 / 任务 / 状态 / token（12 格量级条）/ 花费 / 耗时 |
 
-顶栏下面一排都可以点：时间范围（7/14/30 天）、流水行数（20/50/100）、
-拓扑里画几次派活（6/12/24）、界面语言（中文/EN）。选择会写进 URL：
-`?days=30&rows=100&graph=24&lang=en`，收藏哪一套就是哪一套。
+每张卡片在自己的标题栏右侧带控件：token 图选天数（7/14/30），时间线选它自己的天数，
+项目图选显示几个（4/6/10），拓扑选画几次派活（6/12/24），流水表选行数（20/50/100）；
+语言切换（中文/EN）在右上时钟下面。选择全部写进 URL，可以直接分享：
+`?days=30&tdays=14&projs=4&graph=24&rows=100&lang=en`。
+
+### 委派图怎么看
+
+- 鼠标放到任意节点上——`HERMES`、某个执行者、某条任务、某个工作区——只有和它相关的连线保持点亮，其余淡到 12%。
+- 点击节点可以**锁定**视角；锁定期间自动刷新会暂停。`Esc` 或点空白处取消。
+- 也可以从 URL 锁定：`?focus=w:DSH`（执行者）、`?focus=t:<key>`（单条任务）、`?focus=p:<项目>`（工作区）。
 
 刷新就是一个 `<meta http-equiv="refresh">`：没有前端框架、没有构建步骤、不联网。
 每次请求都重新采集 + 重新渲染，所以页面上永远是"此刻的日志"。
@@ -70,11 +77,18 @@ DSH 的会话文件是 zstd 压缩的 JSONL 事件流。
 
 ## 数据源
 
-| 执行者 | 路径 |
+| 执行者 | 来源 |
 |---|---|
 | DSH headless | `~/.dsh/sessions/**/session.v4.jsonl.zstd` |
 | Pi（一次性） | `~/.pi/agent/sessions/**/*.jsonl` |
 | Pi RPC（常驻） | `~/.hermes/logs/pi-rpc-<name>.jsonl` |
+| Hermes 主循环（desktop / tui / cron） | `~/.hermes/state.db` → `sessions` + `session_model_usage` |
+| Hermes 子 agent | `~/.hermes/state.db` → `async_delegations` |
+| Codex CLI | `~/.codex/sessions/**/*.jsonl` |
+
+每个来源按自己的会话 id 记录，天然不重叠：Hermes 子 agent 是一条委派记录、
+DSH 是一个会话文件、Codex 是一次 rollout。`PROCESSES` 另外读 `ps` / `lsof`，
+给出每个在跑任务背后的真实 OS 进程号。
 
 全程只读：看板不会往任何会话目录写东西。状态（`RUNNING` / `done` / `interrupted`）
 来自事件流和会话自己的记账，不靠推测。

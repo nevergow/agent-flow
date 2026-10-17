@@ -26,10 +26,21 @@ run history.
 | `NOW RUNNING` | the current task with its last tool calls, elapsed time, tokens, cost |
 | `RUN HISTORY` | every run: time, worker, project, task, state, tokens (12-cell bar), cost, duration |
 
-Every panel is adjustable from the bar under the header — time range (7 / 14 / 30
-days), history rows (20 / 50 / 100), how many runs the graph shows (6 / 12 / 24)
-and the UI language (中文 / EN). Choices live in the URL:
-`?days=30&rows=100&graph=24&lang=en`.
+Each card carries its own control in the panel header: the token chart picks its
+range (7 / 14 / 30 days), the timeline its own range, projects how many to show
+(4 / 6 / 10), the graph how many runs to draw (6 / 12 / 24), the history table its
+row count (20 / 50 / 100). The language switch (中文 / EN) sits under the clock.
+Everything is encoded in the URL, so a view is shareable:
+`?days=30&tdays=14&projs=4&graph=24&rows=100&lang=en`.
+
+### Reading the delegation graph
+
+- Hover any node — `HERMES`, a worker, a single task, or a workspace — and only
+  its links stay lit; everything else fades to 12%.
+- Click a node to **pin** the focus; auto-refresh pauses while pinned so the view
+  does not jump under the pointer. `Esc` or a click on empty space clears it.
+- `?focus=w:DSH` pins from the URL: `t:<key>` a task, `w:<worker>` a worker,
+  `p:<project>` a workspace.
 
 Refresh is a plain `<meta http-equiv="refresh">` — no JS framework, no build
 step, no network calls. The page is regenerated on every request, so what you
@@ -80,11 +91,19 @@ Requirements: `python3` (standard library only) and the `zstd` CLI
 
 ## Where the data comes from
 
-| Worker | Path |
+| Worker | Source |
 |---|---|
 | DSH headless | `~/.dsh/sessions/**/session.v4.jsonl.zstd` |
 | Pi (one-shot) | `~/.pi/agent/sessions/**/*.jsonl` |
 | Pi RPC (persistent) | `~/.hermes/logs/pi-rpc-<name>.jsonl` |
+| Hermes sessions (desktop / tui / cron) | `~/.hermes/state.db` → `sessions` + `session_model_usage` |
+| Hermes sub-agents | `~/.hermes/state.db` → `async_delegations` |
+| Codex CLI | `~/.codex/sessions/**/*.jsonl` |
+
+Each source is keyed by its own session id, so nothing is double counted: a
+Hermes sub-agent is a delegation row, a DSH session is a session file, a Codex run
+is a rollout. `PROCESSES` additionally reads `ps` / `lsof` to show the live OS
+process (with its real PID) behind each running task.
 
 Everything is read-only: the dashboard never writes into a session directory.
 Session state (`RUNNING` / `done` / `interrupted`) comes from the event stream

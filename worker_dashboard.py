@@ -1558,7 +1558,7 @@ def demo_procs(lang="zh"):
 
 
 def serve(port, style, refresh, demo, lang="zh", days=14, rows=20, graph_n=12,
-          tdays=7, projs=6, scope="all"):
+          tdays=7, projs=6, scope="all", host="127.0.0.1"):
     """小 HTTP 服务：每次请求重新采集并渲染；页面自带 meta refresh 自动刷新。
 
     查询参数：?lang=zh|en &days=7|14|30 &rows=20|50|100 &graph=6|12|24 &scope=all|dg
@@ -1626,9 +1626,12 @@ def serve(port, style, refresh, demo, lang="zh", days=14, rows=20, graph_n=12,
         def log_message(self, fmt, *args):
             pass
 
-    srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    print(f"http://127.0.0.1:{port}/  (style={style}, lang={lang}, refresh={refresh}s"
+    srv = ThreadingHTTPServer((host, port), Handler)
+    shown = "127.0.0.1" if host in ("0.0.0.0", "", "::") else host
+    print(f"http://{shown}:{port}/  (style={style}, lang={lang}, refresh={refresh}s"
           f"{', demo' if demo else ''})")
+    if host in ("0.0.0.0", "::"):
+        print(f"局域网访问：http://<本机局域网 IP>:{port}/   （绑定 {host}:{port}）")
     srv.serve_forever()
 
 
@@ -1644,6 +1647,8 @@ def main():
     ap.add_argument("--open", action="store_true")
     ap.add_argument("--style", choices=["clean", "pixel"], default="clean")
     ap.add_argument("--serve", type=int, metavar="PORT", help="起 HTTP 服务，每次请求重新采集（页面 5s 自动刷新）")
+    ap.add_argument("--host", default="127.0.0.1",
+                    help="监听地址：127.0.0.1=仅本机（默认）；0.0.0.0=局域网可访问")
     ap.add_argument("--demo", action="store_true", help="用虚构演示数据（截图/试用，不读本机会话）")
     ap.add_argument("--lang", choices=["zh", "en"], default="zh", help="界面语言（默认 zh）")
     ap.add_argument("--days", type=int, choices=[7, 14, 30], default=14, help="图表时间范围")
@@ -1658,7 +1663,8 @@ def main():
     if args.serve:
         return serve(args.serve, args.style, 0 if args.no_refresh else args.refresh, args.demo,
                      lang=args.lang, days=args.days, rows=args.rows, graph_n=args.graph,
-                     tdays=args.tdays, projs=args.projs, scope=args.scope)
+                     tdays=args.tdays, projs=args.projs, scope=args.scope,
+                     host=args.host)
 
     recs = demo_recs(args.lang) if args.demo else W.collect()
     refresh = 0 if args.no_refresh else args.refresh

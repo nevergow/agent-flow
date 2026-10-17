@@ -1,118 +1,97 @@
-# Agent Flow · 本地 agent 工作流看板
+# Worker Dashboard —— 给编码 agent 用的像素风看板
 
 [English](README.md) · **简体中文**
 
-> 一张图看清：**谁在干活、活是谁派的、干到哪一步、花了多少钱。**
+> 一页回答：**今天我把活派给了谁、谁还在跑、每一步花了多少、token 都去哪了。**
 
-把本机上跑着的编码 agent 会话（Hermes / DSH headless / Pi / Pi RPC / Codex /
-子 agent）读出来，画成一张"节点 + 派活边"的实时拓扑。
+单文件、零依赖的本地看板。它读 DSH（headless）、Pi、Pi RPC 本来就会写在本机的
+会话日志，渲染成一页纸色像素看板：KPI、14 天 token 流、7 天时间线、项目分布、
+运行时长、派活拓扑、当前任务和全部运行流水。
 
-![screenshot](docs/screenshot.png)
+![截图](docs/screenshot.png)
 
-## 它解决什么
+## 图上有什么
 
-同时开几个编码 agent，终端里只剩碎片日志：不知道谁在跑、卡在哪一步、哪条任务是
-谁派的、今天到底烧了多少钱。Agent Flow 把这些会话日志读出来，画成一张实时拓扑：
+| 区块 | 内容 |
+|---|---|
+| 4 张 KPI 卡 | 在跑 / 今日派活次数 / 今日 token（含缓存读）/ 今日花费 |
+| `TOKENS / 14D` | 按天堆叠 cache / input / output，叠加花费曲线 |
+| `TIMELINE / 7D` | 每次运行画成本地 0–24 点的一条色带，按执行者着色 |
+| `PROJECTS` | 每个工作区的 token、次数、占比 |
+| `DURATION` | 最近若干次运行的实际耗时，按结果绿/黄/红 |
+| `DELEGATION GRAPH` | 编排 → 执行者 → 任务节点 → 工作区，一次派活一条车道 |
+| `NOW RUNNING` | 当前任务 + 最近几次工具调用 + 已运行时长 + token + 花费 |
+| `RUN HISTORY` | 全部流水：时间 / 执行者 / 项目 / 任务 / 状态 / token（12 格量级条）/ 花费 / 耗时 |
 
-- 节点 = 参与者：你 → 编排主循环 → 执行者（沙箱长链 / 单点 / 常驻 / 子 agent）→ 工作区
-- 边 = 一次派活，单向；同一对节点之间可以有多条（每一步一条，分开画成不同车道）
-- 在跑的边实线绿色，跑完待验收的红色虚线，已结束的淡灰——颜色即状态
-- 每一行 `RUN HISTORY` 就是一次派活，等于一条从"你下的指令"到"这一步花了多少"的审计链。
+刷新就是一个 `<meta http-equiv="refresh">`：没有前端框架、没有构建步骤、不联网。
+每次请求都重新采集 + 重新渲染，所以页面上永远是"此刻的日志"。
 
 ## 快速开始
 
-零依赖，Python 3.9+ 标准库即可；`zstd` 命令用于读 DSH 的压缩会话（没有就自动跳过 DSH）。
-
 ```bash
-git clone <this-repo> agent-flow && cd agent-flow
+# 生成一份静态页到 ~/.hermes/cache/worker-dashboard-pixel.html 并打开
+python3 worker_dashboard.py --style pixel --open
 
-python3 agent_flow.py --demo        # 内置演示数据（虚构 demo-app），先看效果
-# 浏览器打开 http://127.0.0.1:8799/
+# 起实时看板（每次请求重新采集，页面自己每 5 秒刷新）
+python3 worker_dashboard.py --style pixel --serve 8799
+# → http://127.0.0.1:8799/
 
-python3 agent_flow.py               # 读本机真实数据
-python3 agent_flow.py --port 9000 --window 30
+# 演示数据（完全不读本机，适合截图/第一次看效果）
+python3 worker_dashboard.py --style pixel --demo --serve 8801
 ```
 
 参数：
 
-| 参数 | 作用 |
+| 参数 | 说明 |
 |---|---|
-| `--port` | 监听端口，默认 8799（只绑 127.0.0.1） |
-| `--window` | 时间窗（分钟），默认 15 |
-| `--demo` | 用内置演示数据，不读任何本机文件 |
-| `--backfill [天]` | 从历史会话日志回填（分钟粒度，默认 7 天），让 7 天图表立刻有内容 |
-| `--history [小时]` | 在终端打印历史任务表（含成本） |
-| `--dump` | 打印一次实时快照 JSON（调试采集用） |
+| `--style pixel` | 像素风看板（默认 `clean` 是朴素的浅色表格） |
+| `--serve PORT` | 在 127.0.0.1 起服务，每次请求重新采集 |
+| `--demo` | 合成会话数据，不读本机任何文件 |
+| `--refresh N` | 自动刷新秒数（默认 5，0 = 关） |
+| `--no-refresh` | 等价于 `--refresh 0` |
+| `--out FILE` | 一次性生成的 HTML 路径 |
 
-页面参数：`?static=1` 关闭动画（截图 / 低功耗）。
+依赖：`python3`（只用标准库）+ `zstd` 命令行（`brew install zstd`）——
+DSH 的会话文件是 zstd 压缩的 JSONL 事件流。
 
-## 图上有什么
+## 数据源
 
-- **4 张统计卡**：在跑任务 / 今天派出次数 / 今天 token 吞吐 / 今天花费
-- **DELEGATION GRAPH**：`INGRESS → ORCHESTRATOR → WORKERS → WORKSPACE` 四列，
-  每一次派活一条边、单向箭头；线越粗这一步越贵；绿色实线=在跑，红虚线=待验收，淡线=已结束
-- **TOKENS / 7D**：按天的 cache / input / output 堆叠柱 + 花费点
-- **RUNS / 7D**：按天派活次数，按执行者堆叠
-- **PROJECTS**：每个工作区的 token 与次数
-- **DURATION**：最近 10 次运行的耗时条，按结果着色
-- **RUN HISTORY**：全部流水——时间 / 执行者 / 项目 / 任务 / 状态 / token（带 12 格量级条）/ 花费 / 耗时
+| 执行者 | 路径 |
+|---|---|
+| DSH headless | `~/.dsh/sessions/**/session.v4.jsonl.zstd` |
+| Pi（一次性） | `~/.pi/agent/sessions/**/*.jsonl` |
+| Pi RPC（常驻） | `~/.hermes/logs/pi-rpc-<name>.jsonl` |
 
-风格是刻意的复古：纸色底 + 2px 墨线 + 硬投影 + Press Start 2P 像素字体
-（字体内嵌在 HTML 里，不联网、离线可用）。
-
-## 数据来源（全部只读，不写任何会话文件）
-
-| 来源 | 默认路径 | 取到什么 |
-|---|---|---|
-| DSH headless | `~/.dsh/sessions/<cwd>/session-*/session.v*.jsonl.zstd` | 任务书、turn/step、每次调用 usage、工具调用 |
-| Pi（一次性） | `~/.pi/agent/sessions/<cwd>/*.jsonl` | 用户任务、每轮 usage |
-| Pi RPC（常驻） | `~/.hermes/logs/pi-rpc-<name>.jsonl` | 事件流、turn_end usage |
-| Codex CLI | `~/.codex/sessions/**/rollout-*.jsonl` | `token_count` 累计值、工具调用、cwd |
-| Hermes 子 agent | `~/.hermes/state.db` → `async_delegations` | 真实父子关系、状态、`result_json` 里的 tokens/cost |
-| Hermes 主循环活性 | `~/.hermes/logs/agent.log` | 最后一次 API 调用 / 工具调用时间 |
-
-历史与回放存在 `~/.hermes/state/agent_flow/tasks.json`（每 15 秒一个采样点，保留 7 天）。
+全程只读：看板不会往任何会话目录写东西。状态（`RUNNING` / `done` / `interrupted`）
+来自事件流和会话自己的记账，不靠推测。
 
 ## 成本口径
 
-所有金额都是**本地估算**，不是账单：
+- **DSH** —— token 用量 × DeepSeek 官价：输入 ¥1/M、输出 ¥4/M、缓存命中 ¥0.02/M；
+  北京时间工作日 9–12、14–18 高峰时段翻倍。
+- **Pi / Pi RPC** —— 用 CLI 自己报的费用（美元），显示为 `$`。
 
-- DSH / Pi / Pi RPC / Codex：按 deepseek-flash 官方价换算
-  （输入 ¥1、输出 ¥4、缓存命中 ¥0.02 每百万 token；北京时间工作日
-  09:00–12:00 / 14:00–18:00 双倍），逐次调用累加
-- 子 agent：优先用 `result_json.tokens` 按同一价目表换算；没有明细时退回
-  Hermes 自报的 `cost_usd × 7.1`
-- token 数含缓存命中——它衡量的是**吞吐**，不是"新产生的思考量"
+这是估算不是账单：数字来自 agent 自己记的 usage；一次被续跑过的会话按它实际
+发出的调用计费。
 
-## 派活登记：把"谁派的"变成事实
+## 隐私
 
-默认情况下"谁派的"只能靠进程树和 cwd 推断（图上标 `推定`）。用 `scripts/af_dispatch.py`
-包一层，先写一条登记再 `exec` 真命令（pid 不变），采集端就能标 `登记`：
+`--demo` 用固定种子生成一套虚构数据（三个假项目、24 条运行），所以上面这张
+截图和任何公开演示里都没有真实项目名、路径或任务正文。正常模式不联网：页面
+要么是本地文件，要么是 `127.0.0.1` 上的服务。
 
-```bash
-scripts/af_dispatch.py --kind dsh --label "Step 12 缓存预热" \
-    --task docs/tasks/step12.md -- \
-    bash -lc 'cd ~/code/my-app && node ... headless - < docs/tasks/step12.md'
-```
+## 另一个视图
 
-登记文件落在 `~/.hermes/state/agent_flow/dispatches/*.json`。
+同仓库的 `agent_flow.py` 是第二套前端：用一份小 JSON 账本驱动的 SVG 拓扑，适合
+回放昨天、看"父 → 子"的派活边，而不是一张平铺的运行表。两者读同一批 worker
+日志，都不写。
 
-## 已知边界
+## 字体
 
-- **DSH 内部再起的子 agent 看不到**：会话日志里没有可关联的父指针
-- **解析强绑定当前版本**：DSH 会话 v4、Pi 1.x、Codex rollout v1；上游格式变了要跟着改
-- **只面向本机**：没有鉴权、没有多机聚合，服务只绑 `127.0.0.1`
-- 系统级指标（CPU/内存）不采集，这里只关心"谁在干活"
+像素界面内嵌 [Press Start 2P](https://fonts.google.com/specimen/Press+Start+2P)
+（SIL Open Font License 1.1，见 `assets/OFL.txt`）的 base64，离线渲染也一致；
+字体文件缺失时回落到系统等宽字体。
 
-## 目录
+## 许可
 
-```
-agent_flow.py       采集 + 内置 HTTP 服务（标准库）
-agent_flow.html     单页前端（原生 JS + SVG，无构建步骤）
-scripts/af_dispatch.py  派活登记包装器
-docs/screenshot.png 演示截图（--demo 数据）
-```
-
-## License
-
-MIT
+MIT —— 见 [LICENSE](LICENSE)。

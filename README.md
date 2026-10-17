@@ -1,153 +1,106 @@
-# Agent Flow — a local dashboard for your coding agents
+# Worker Dashboard — a pixel board for your coding agents
 
 **English** · [简体中文](README.zh-CN.md)
 
-> One picture that answers: **who is working, who dispatched what to whom,
-> which stage each task is in, and what it cost.**
+> One page that answers: **what did I hand to the agents today, which one is
+> still running, what did each step cost, and where did the tokens go.**
 
-A local, zero-dependency dashboard that reads coding-agent session logs
-(Hermes / DSH headless / Pi / Pi RPC / Codex / sub-agents) and renders them as a
-paper-and-pixels operations board: a live delegation graph plus the full run
-ledger with tokens, cost and duration per task.
+A single-file, zero-dependency dashboard for local coding agents. It reads the
+session logs that DSH (headless), Pi and Pi RPC already write to disk, and
+renders one paper-and-pixels board: KPIs, 14-day token flow, 7-day timeline,
+project split, run durations, the delegation graph, the live task and the full
+run history.
 
 ![screenshot](docs/screenshot.png)
 
 ## What's on the board
 
-- **4 stat cards** — running now / today's dispatches / today's token throughput / today's cost
-- **DELEGATION GRAPH** — vertical lanes (`INGRESS → ORCHESTRATOR → WORKERS → WORKSPACE`),
-  one edge per dispatch, arrowheads one-way; line weight follows the step's cost
-- **TOKENS / 7D** — stacked cache / input / output bars per day with a cost line
-- **RUNS / 7D** — dispatches per day, stacked by executor
-- **PROJECTS** — tokens and run count per workspace
-- **DURATION** — last 10 runs as bars, coloured by outcome
-- **RUN HISTORY** — every run: time, worker, project, task, state, tokens (with a
-  12-segment magnitude bar), cost, duration
+| Block | What it shows |
+|---|---|
+| 4 KPI cards | running now · dispatches today · tokens today (cache included) · cost today |
+| `TOKENS / 14D` | stacked cache / input / output bars per day, with the cost curve on top |
+| `TIMELINE / 7D` | every run as a band on a local 0–24h clock, coloured by worker |
+| `PROJECTS` | tokens, run count and share per workspace |
+| `DURATION` | recent runs by wall-clock length, green / amber / red by outcome |
+| `DELEGATION GRAPH` | orchestrator → worker → task nodes → workspace, one lane per dispatch |
+| `NOW RUNNING` | the current task with its last tool calls, elapsed time, tokens, cost |
+| `RUN HISTORY` | every run: time, worker, project, task, state, tokens (12-cell bar), cost, duration |
 
-The look is deliberately retro: paper background, 2px ink borders, hard offset
-shadows, and the Press Start 2P pixel font embedded in the HTML (no network
-requests, works offline).
-
-## Why
-
-Run a few coding agents in parallel and the terminal turns into fragmented logs.
-You lose track of who is still running, where they are stuck, which task came
-from which parent, and what all of it costs.
-
-Agent Flow reads those session logs locally and draws a live "nodes + dispatch
-edges" graph:
-
-- **Nodes** — participants: you → orchestrator → workers (sandboxed long-chain /
-  one-shot / persistent / sub-agent) → workspace
-- **Edges** — one dispatch each, strictly directed; the same pair of nodes can
-  have many edges (one per step), drawn as separate lanes
-- **Live** — running steps are solid green, awaiting-acceptance dashed red, and
-  finished ones faint grey; the whole board refreshes every 5 seconds
-- Every row in `RUN HISTORY` is one dispatch, so the board doubles as an
-  audit trail from "you asked" to "what it cost".
+Refresh is a plain `<meta http-equiv="refresh">` — no JS framework, no build
+step, no network calls. The page is generated from scratch on every request, so
+what you see is always the state of the logs at that moment.
 
 ## Quick start
 
-Zero dependencies: Python 3.9+ standard library. The `zstd` CLI is used to read
-DSH's compressed session logs (DSH is skipped if it is missing).
-
 ```bash
-git clone <this-repo> agent-flow && cd agent-flow
+# one-shot: write the HTML to ~/.hermes/cache/worker-dashboard-pixel.html
+python3 worker_dashboard.py --style pixel --open
 
-python3 agent_flow.py --demo        # built-in demo data (fictional demo-app)
-# open http://127.0.0.1:8799/
+# live board (regenerates on every request; the page reloads itself every 5s)
+python3 worker_dashboard.py --style pixel --serve 8799
+# → http://127.0.0.1:8799/
 
-python3 agent_flow.py               # read this machine's real data
-python3 agent_flow.py --port 9000 --window 30
+# fictional data, nothing read from your machine (screenshots / first look)
+python3 worker_dashboard.py --style pixel --demo --serve 8801
 ```
 
-| Flag | Purpose |
+Options:
+
+| Flag | Meaning |
 |---|---|
-| `--port` | listen port, default 8799 (bound to 127.0.0.1 only) |
-| `--window` | time window in minutes, default 15 |
-| `--demo` | serve built-in demo data, read nothing from disk |
-| `--backfill [days]` | rebuild history from old session logs (minute resolution, default 7 days) |
-| `--history [hours]` | print a task table with cost to stdout |
-| `--dump` | print one live snapshot as JSON (debugging the collector) |
+| `--style pixel` | the retro pixel board (default is `clean`, a plain light table) |
+| `--serve PORT` | serve on 127.0.0.1 and re-collect on each request |
+| `--demo` | synthetic sessions — safe for screenshots, reads no local files |
+| `--refresh N` | auto-reload interval in seconds (default 5, `0` disables) |
+| `--no-refresh` | same as `--refresh 0` |
+| `--out FILE` | where to write the one-shot HTML |
 
-Page option: `?static=1` disables the live refresh (handy for screenshots).
+Requirements: `python3` (standard library only) and the `zstd` CLI
+(`brew install zstd`) — DSH session files are zstd-compressed JSONL streams.
 
-## How to read the graph
+## Where the data comes from
 
-- **Columns**: `INGRESS → ORCHESTRATOR → WORKERS → WORKSPACE`. Every executor
-  gets a box; idle ones show `IDLE` instead of a session count
-- **Boxes**: name / `n 会话 · stage · tokens · cost` (in the window)
-- **Edges**: one dispatch each, L-shaped, arrowheads one-way; active steps are
-  solid, awaiting-acceptance dashed red, finished ones faint
-- **Table rows**: `RUN` / `WAIT` / `DONE` pills follow the same colour code as
-  the graph — red means "finished, waiting for your review"
-- **Stage** is inferred from tool names in the last 3 minutes: `侦察` (read-only),
-  `实现` (writes), `自检` (test commands), `收尾`.
+| Worker | Path |
+|---|---|
+| DSH headless | `~/.dsh/sessions/**/session.v4.jsonl.zstd` |
+| Pi (one-shot) | `~/.pi/agent/sessions/**/*.jsonl` |
+| Pi RPC (persistent) | `~/.hermes/logs/pi-rpc-<name>.jsonl` |
 
-UI strings are Chinese; the data model and API are language-neutral, so
-translating the front end is a string-table change.
-
-## Data sources (read-only — nothing is ever written to session files)
-
-| Source | Default path | What is read |
-|---|---|---|
-| DSH headless | `~/.dsh/sessions/<cwd>/session-*/session.v*.jsonl.zstd` | task text, turn/step, per-call usage, tool calls |
-| Pi one-shot | `~/.pi/agent/sessions/<cwd>/*.jsonl` | user task, per-turn usage |
-| Pi RPC (persistent) | `~/.hermes/logs/pi-rpc-<name>.jsonl` | event stream, turn_end usage |
-| Codex CLI | `~/.codex/sessions/**/rollout-*.jsonl` | `token_count` totals, tool calls, cwd |
-| Hermes sub-agents | `~/.hermes/state.db` → `async_delegations` | real parent/child relation, state, tokens + cost in `result_json` |
-| Hermes main loop | `~/.hermes/logs/agent.log` | last API / tool call timestamps |
-
-History and replay samples live in `~/.hermes/state/agent_flow/tasks.json`
-(one sample every 15 s, 7-day retention).
+Everything is read-only: the dashboard never writes into a session directory.
+Session state (`RUNNING` / `done` / `interrupted`) comes from the event stream
+plus the session's own bookkeeping, not from guessing.
 
 ## Cost model
 
-Every number is a **local estimate**, not a bill:
+- **DSH** — token usage × DeepSeek list price: ¥1/M input, ¥4/M output,
+  ¥0.02/M cache hit; peak hours (weekday 09–12 and 14–18, Beijing) are doubled.
+- **Pi / Pi RPC** — the cost the CLI itself reports (USD), shown as `$`.
 
-- DSH / Pi / Pi RPC / Codex: priced with deepseek-flash official rates
-  (input ¥1, output ¥4, cache hit ¥0.02 per million tokens; doubled during
-  Beijing-time weekday 09:00–12:00 and 14:00–18:00), summed per call
-- Sub-agents: derived from `result_json.tokens` with the same table; falls back
-  to Hermes' own `cost_usd × 7.1` when token detail is missing
-- Token counts include cache hits — they measure **throughput**, not "new
-  thinking"
+Costs are estimates, not invoices: they are computed from usage counters the
+agents log, and a session that was resumed several times is charged once per
+call it made.
 
-## Dispatch registry: turn "who dispatched this" into a fact
+## Privacy
 
-By default the parent is inferred from the process tree and cwd (marked `推定`,
-"inferred"). Wrap the launch in `scripts/af_dispatch.py` to write a registry
-entry first and then `exec` the real command (same pid), so the dashboard can
-mark it `登记` ("registered"):
+`--demo` generates a fixed synthetic dataset (three fictional projects, 24
+runs), so the screenshot above and any public demo contain no real project
+names, paths or task text. The normal mode never leaves your machine: the page
+is a local file or a `127.0.0.1` server.
 
-```bash
-scripts/af_dispatch.py --kind dsh --label "Step 12 cache warmup" \
-    --task docs/tasks/step12.md -- \
-    bash -lc 'cd ~/code/my-app && node ... headless - < docs/tasks/step12.md'
-```
+## Alternative view
 
-Registry entries are written to `~/.hermes/state/agent_flow/dispatches/*.json`.
+`agent_flow.py` (same repo) is a second front end: an SVG topology driven by a
+small JSON ledger, useful when you want to replay yesterday and see the
+parent → child dispatch edges rather than a flat run table. Both read the same
+worker logs; neither writes to them.
 
-## Known limitations
+## Font
 
-- **Sub-agents spawned inside DSH are invisible**: their session logs carry no
-  back-reference to a parent
-- **Parsers track current formats**: DSH session v4, Pi 1.x, Codex rollout v1 —
-  upstream format changes require updates here
-- **Single machine only**: no auth, no multi-host aggregation; the server binds
-  to `127.0.0.1`
-- System metrics (CPU/RAM) are deliberately not collected — this tool is about
-  who is doing work, not how loaded the box is
-
-## Layout
-
-```
-agent_flow.py             collector + built-in HTTP server (stdlib only)
-agent_flow.html           single-page front end (vanilla JS + SVG, no build step)
-scripts/af_dispatch.py    dispatch registry wrapper
-docs/screenshot.png       demo-mode screenshot
-```
+The pixel UI embeds [Press Start 2P](https://fonts.google.com/specimen/Press+Start+2P)
+(SIL Open Font License 1.1, see `assets/OFL.txt`) as base64 inside the HTML, so
+the page renders identically offline. If the font file is missing the page
+falls back to the system monospace face.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).

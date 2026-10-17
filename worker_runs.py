@@ -24,6 +24,7 @@ KEY 是打印在表格第一列末尾的短标识（DSH 取 session id 前 8 位
 """
 
 import argparse
+import copy
 import glob
 import json
 import os
@@ -41,8 +42,10 @@ PI_SESSIONS = os.path.join(HOME, ".pi", "agent", "sessions")
 PI_RPC_LOGS = os.path.join(HOME, ".hermes", "logs")
 TZ = timezone(timedelta(hours=8))
 
-# deepseek-flash 官方价（元/百万 token，空闲 / 高峰=双倍）
+# deepseek-flash 官方价（元/百万 token；空闲价，高峰=双倍）
+# 缓存命中 ¥0.02 / 输入未命中 ¥1 / 输出 ¥4 —— 见 api-docs.deepseek.com/quick_start/pricing
 PRICE = {"in": 1.0, "out": 4.0, "cache": 0.02}
+FX = 7.1  # 美元折算汇率，只用于把上游自报的 $ 估算并到人民币口径
 
 
 def _peak(ts):
@@ -52,6 +55,68 @@ def _peak(ts):
         return False
     h = d.hour + d.minute / 60
     return (9 <= h < 12) or (14 <= h < 18)
+
+
+def cost_cny_of(tin, tout, tcache, ts):
+    """统一口径的 token 花费估算（元）：六种执行者用同一张表，避免"谁的 $ 谁的 ¥"打架。
+
+    ts 只用来判高峰/空闲；跨时段的长会话按开始时刻近似。
+    """
+    k = 2 if _peak(ts or time.time()) else 1
+    return round(k * (int(tin or 0) * PRICE["in"]
+                      + int(tout or 0) * PRICE["out"]
+                      + int(tcache or 0) * PRICE["cache"]) / 1e6, 6)
+
+
+IDLE_GAP = 20 * 60  # 空闲超过 20 分钟算两段活动
+
+
+def activity_segments(times, running=False, gap=IDLE_GAP):
+    """把事件时间戳压成"活跃区间"：[["s","e"], ...]。
+
+    会话会被恢复/复用（DSH 会话 10-04 建的，10-17 又聊了几句），按 created→last
+    画就是一条 13 天的假长条；只有按活跃区间画，时间线才回答"什么时候真的在跑"。
+    """
+    segs = []
+    for t in sorted(x for x in times if x):
+        if segs and t - segs[-1][1] <= gap:
+            segs[-1][1] = max(segs[-1][1], t)
+        else:
+            segs.append([t, t])
+    if running and segs:
+        segs[-1][1] = max(segs[-1][1], time.time())
+    return segs
+
+
+def seg_seconds(segs):
+    return sum(max(0.0, b - a) for a, b in (segs or []))
+
+
+
+# ---------------------------------------------------------------- 单文件解析缓存
+# 看板每 5s 自刷、切范围时都会重跑 collect()。会话文件只有少数在变，
+# 按 (mtime,size) 缓存单文件解析结果，避免每次重解 30MB 的 pi-rpc 日志。
+_PARSE_CACHE = {}
+_PARSE_CACHE_MAX = 512
+
+
+def _parse_cached(path, parser):
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    sig = (round(st.st_mtime, 3), st.st_size)
+    ent = _PARSE_CACHE.get(path)
+    if ent and ent[0] == sig:
+        return copy.deepcopy(ent[1])
+    rec = parser()
+    if rec is None:
+        return None
+    _PARSE_CACHE[path] = (sig, copy.deepcopy(rec))
+    if len(_PARSE_CACHE) > _PARSE_CACHE_MAX:
+        for k in list(_PARSE_CACHE)[: len(_PARSE_CACHE) - _PARSE_CACHE_MAX]:
+            _PARSE_CACHE.pop(k, None)
+    return rec
 
 
 def _fmt_dur(sec):
@@ -113,6 +178,112 @@ def _iter_dsh_events(path):
 
 # --------------------------------------------------------------------------- DSH
 
+def _finish_dsh(rec):
+    """状态/起止时间随时钟变化，缓存命中的 rec 每次都要重算这一段。"""
+    age = time.time() - rec["last"]
+    if age < 120 and rec["reason"] is None:
+        rec["state"] = "RUNNING"
+    elif rec["reason"] == "completed":
+        rec["state"] = "done"
+    elif rec["reason"] in ("aborted", "cancelled"):
+        rec["state"] = "aborted"
+    elif rec["reason"] in ("error", "failed"):
+        rec["state"] = "FAILED"
+    elif rec["last"] and rec["reason"] is None:
+        rec["state"] = "interrupted"
+    rec["start"] = rec["created"] or rec["last"]
+    rec["end"] = rec["last"] if rec["state"] != "RUNNING" else None
+    rec["label"] = rec["title"] or rec["task"]
+    return _extend_running(rec)
+
+
+def _extend_running(rec):
+    """RUNNING 的会话：最后一段活跃区间延伸到此刻（否则条子停在最后一次事件上）。"""
+    if rec.get("state") == "RUNNING" and rec.get("segs"):
+        rec["segs"][-1][1] = max(rec["segs"][-1][1], time.time())
+    return rec
+
+
+def _parse_dsh(sd, path):
+    rec = {
+        "worker": "DSH",
+        "path": path,
+        "key": os.path.basename(sd).replace("session-", "")[:8],
+        "state": "?",
+        "tokens": 0,
+        "tok_in": 0,
+        "tok_out": 0,
+        "tok_cache": 0,
+        "cost_cny": 0.0,
+        "steps": 0,
+        "turns": 0,
+        "tools": {},
+        "tool_calls": [],
+        "title": "",
+        "task": "",
+        "last_text": "",
+        "reason": None,
+        "created": 0.0,
+        "last": os.path.getmtime(path),
+    }
+    last_ts = 0.0
+    times = []
+    for e in _iter_dsh_events(path):
+        t = e.get("type")
+        d = e.get("data") or {}
+        ts = _ms(e.get("time")) or rec["last"]
+        last_ts = max(last_ts, ts)
+        times.append(ts)
+        if t == "session":  # cwd / createdAt 在顶层，不在 data 里
+            rec["cwd"] = e.get("cwd") or d.get("cwd") or ""
+            rec["created"] = _ms(e.get("createdAt") or d.get("createdAt")) or ts
+        elif t == "session/title":
+            rec["title"] = d.get("title") or rec["title"]
+        elif t == "user/message":
+            if not rec["task"]:
+                for c in d.get("content") or []:
+                    if c.get("type") == "text":
+                        rec["task"] = c.get("text") or ""
+                        break
+        elif t == "turn/start":
+            rec["turns"] += 1
+        elif t == "step/start":
+            rec["steps"] += 1
+        elif t == "assistant/message":
+            msg = d.get("message") or {}
+            u = d.get("usage") or msg.get("usage") or {}
+            if u:
+                peak = _peak(ts)
+                k = 2 if peak else 1
+                rec["tokens"] += int(u.get("totalTokens") or 0)
+                rec["tok_in"] += int(u.get("inputTokens") or 0)
+                rec["tok_out"] += int(u.get("outputTokens") or 0)
+                rec["tok_cache"] += int(u.get("cacheReadTokens") or 0)
+                rec["cost_cny"] += k * (
+                    (int(u.get("inputTokens") or 0) * PRICE["in"]
+                     + int(u.get("outputTokens") or 0) * PRICE["out"]
+                     + int(u.get("cacheReadTokens") or 0) * PRICE["cache"])
+                    / 1e6
+                )
+            texts = [c.get("text", "") for c in msg.get("content") or [] if c.get("type") == "text"]
+            if any(x.strip() for x in texts):
+                rec["last_text"] = "\n".join(x for x in texts if x.strip())
+        elif t == "tool/call":
+            name = d.get("name") or "?"
+            rec["tools"][name] = rec["tools"].get(name, 0) + 1
+            rec["tool_calls"].append((ts, name, _one_line(d.get("arguments"), 140)))
+        elif t == "turn/end":
+            rec["reason"] = (d.get("reason") or {}).get("kind")
+    if not rec.get("cwd"):
+        rec["cwd"] = os.path.basename(os.path.dirname(sd)).replace("--", "/").replace("-", "/")
+    rec["project"] = os.path.basename(rec["cwd"]) or "?"
+    if last_ts:
+        rec["last"] = last_ts
+    rec["cost_cny"] = round(rec["cost_cny"], 6)
+    rec["segs"] = activity_segments(times)
+    return rec
+
+
 def scan_dsh():
     out = []
     for sd in glob.glob(os.path.join(DSH_SESSIONS, "*", "session-*")):
@@ -124,93 +295,10 @@ def scan_dsh():
         if not files:
             continue
         path = files[0]
-        rec = {
-            "worker": "DSH",
-            "path": path,
-            "key": os.path.basename(sd).replace("session-", "")[:8],
-            "state": "?",
-            "tokens": 0,
-            "tok_in": 0,
-            "tok_out": 0,
-            "tok_cache": 0,
-            "cost_cny": 0.0,
-            "steps": 0,
-            "turns": 0,
-            "tools": {},
-            "tool_calls": [],
-            "title": "",
-            "task": "",
-            "last_text": "",
-            "reason": None,
-            "created": 0.0,
-            "last": os.path.getmtime(path),
-        }
-        last_ts = 0.0
-        for e in _iter_dsh_events(path):
-            t = e.get("type")
-            d = e.get("data") or {}
-            ts = _ms(e.get("time")) or rec["last"]
-            last_ts = max(last_ts, ts)
-            if t == "session":  # cwd / createdAt 在顶层，不在 data 里
-                rec["cwd"] = e.get("cwd") or d.get("cwd") or ""
-                rec["created"] = _ms(e.get("createdAt") or d.get("createdAt")) or ts
-            elif t == "session/title":
-                rec["title"] = d.get("title") or rec["title"]
-            elif t == "user/message":
-                if not rec["task"]:
-                    for c in d.get("content") or []:
-                        if c.get("type") == "text":
-                            rec["task"] = c.get("text") or ""
-                            break
-            elif t == "turn/start":
-                rec["turns"] += 1
-            elif t == "step/start":
-                rec["steps"] += 1
-            elif t == "assistant/message":
-                msg = d.get("message") or {}
-                u = d.get("usage") or msg.get("usage") or {}
-                if u:
-                    peak = _peak(ts)
-                    k = 2 if peak else 1
-                    rec["tokens"] += int(u.get("totalTokens") or 0)
-                    rec["tok_in"] += int(u.get("inputTokens") or 0)
-                    rec["tok_out"] += int(u.get("outputTokens") or 0)
-                    rec["tok_cache"] += int(u.get("cacheReadTokens") or 0)
-                    rec["cost_cny"] += k * (
-                        (int(u.get("inputTokens") or 0) * PRICE["in"]
-                         + int(u.get("outputTokens") or 0) * PRICE["out"]
-                         + int(u.get("cacheReadTokens") or 0) * PRICE["cache"])
-                        / 1e6
-                    )
-                texts = [c.get("text", "") for c in msg.get("content") or [] if c.get("type") == "text"]
-                if any(x.strip() for x in texts):
-                    rec["last_text"] = "\n".join(x for x in texts if x.strip())
-            elif t == "tool/call":
-                name = d.get("name") or "?"
-                rec["tools"][name] = rec["tools"].get(name, 0) + 1
-                rec["tool_calls"].append((ts, name, _one_line(d.get("arguments"), 140)))
-            elif t == "turn/end":
-                rec["reason"] = (d.get("reason") or {}).get("kind")
-        if not rec.get("cwd"):
-            rec["cwd"] = os.path.basename(os.path.dirname(sd)).replace("--", "/").replace("-", "/")
-        rec["project"] = os.path.basename(rec["cwd"]) or "?"
-        if last_ts:
-            rec["last"] = last_ts
-        age = time.time() - rec["last"]
-        if age < 120 and rec["reason"] is None:
-            rec["state"] = "RUNNING"
-        elif rec["reason"] == "completed":
-            rec["state"] = "done"
-        elif rec["reason"] in ("aborted", "cancelled"):
-            rec["state"] = "aborted"
-        elif rec["reason"] in ("error", "failed"):
-            rec["state"] = "FAILED"
-        elif rec["last"] and rec["reason"] is None:
-            rec["state"] = "interrupted"
-        rec["start"] = rec["created"] or rec["last"]
-        rec["end"] = rec["last"] if rec["state"] != "RUNNING" else None
-        rec["label"] = rec["title"] or rec["task"]
-        out.append(rec)
+        rec = _parse_cached(path, lambda sd=sd, path=path: _parse_dsh(sd, path))
+        if rec is None:
+            continue
+        out.append(_finish_dsh(rec))
     return out
 
 
@@ -223,171 +311,203 @@ def _pi_usage_totals(msg):
     return tok, cost
 
 
+def _parse_pi_session(path):
+    rec = {
+        "worker": "Pi",
+        "path": path,
+        "key": os.path.basename(path).split("_")[-1].replace(".jsonl", "")[:8],
+        "state": "?",
+        "tokens": 0,
+        "tok_in": 0,
+        "tok_out": 0,
+        "tok_cache": 0,
+        "cost_usd": 0.0,
+        "title": "",
+        "task": "",
+        "last_text": "",
+        "reason": None,
+        "created": 0.0,
+        "last": os.path.getmtime(path),
+        "tool_calls": [],
+        "tools": {},
+        "steps": 0,
+        "turns": 0,
+    }
+    times = []
+    try:
+        for line in open(path, encoding="utf-8", errors="replace"):
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            t = e.get("type")
+            mts = _ms(e.get("timestamp"))
+            if mts:
+                times.append(mts)
+            if t == "session":
+                rec["cwd"] = e.get("cwd") or ""
+                rec["created"] = _ms(e.get("timestamp"))
+            elif t == "session_info":
+                rec["title"] = e.get("name") or rec["title"]
+            elif t == "message":
+                msg = e.get("message") or {}
+                role = msg.get("role")
+                ts = _ms(e.get("timestamp")) or rec["last"]
+                if role == "user":
+                    content = msg.get("content")
+                    txt = content if isinstance(content, str) else " ".join(
+                        c.get("text", "") for c in content or [] if isinstance(c, dict)
+                    )
+                    if not rec["task"]:
+                        rec["task"] = txt
+                    rec["turns"] += 1
+                elif role == "assistant":
+                    tok, cost = _pi_usage_totals(msg)
+                    rec["tokens"] += tok
+                    rec["tok_in"] += int((msg.get("usage") or {}).get("input") or 0)
+                    rec["tok_out"] += int((msg.get("usage") or {}).get("output") or 0)
+                    rec["tok_cache"] += int((msg.get("usage") or {}).get("cacheRead") or 0)
+                    rec["cost_usd"] += cost
+                    if (msg.get("stopReason") or "") == "stop":
+                        rec["ended"] = True
+                    content = msg.get("content") or []
+                    txt = []
+                    for c in content if isinstance(content, list) else []:
+                        if c.get("type") == "text":
+                            txt.append(c.get("text", ""))
+                        elif c.get("type") == "toolCall":
+                            name = c.get("name") or "?"
+                            rec["tools"][name] = rec["tools"].get(name, 0) + 1
+                            rec["tool_calls"].append(
+                                (ts, name, _one_line(json.dumps(c.get("arguments")), 140))
+                            )
+                    if txt:
+                        rec["last_text"] = "\n".join(txt)
+            elif t == "tool_execution_start":
+                pass
+    except OSError:
+        return None
+    rec.setdefault("cwd", "")
+    rec["project"] = os.path.basename(rec["cwd"]) or "?"
+    rec["state"] = "done" if rec.get("ended") else "interrupted"
+    rec["start"] = rec["created"] or rec["last"]
+    rec["end"] = rec["last"]
+    rec["label"] = rec["title"] or rec["task"]
+    rec["kind"] = "one-shot"
+    rec["cost_cny"] = cost_cny_of(rec["tok_in"], rec["tok_out"], rec["tok_cache"], rec["start"])
+    rec["segs"] = activity_segments(times)
+    return rec
+
+
 def scan_pi_sessions():
     out = []
     for path in glob.glob(os.path.join(PI_SESSIONS, "*", "*.jsonl")):
-        rec = {
-            "worker": "Pi",
-            "path": path,
-            "key": os.path.basename(path).split("_")[-1].replace(".jsonl", "")[:8],
-            "state": "?",
-            "tokens": 0,
-            "tok_in": 0,
-            "tok_out": 0,
-            "tok_cache": 0,
-            "cost_usd": 0.0,
-            "title": "",
-            "task": "",
-            "last_text": "",
-            "reason": None,
-            "created": 0.0,
-            "last": os.path.getmtime(path),
-            "tool_calls": [],
-            "tools": {},
-            "steps": 0,
-            "turns": 0,
-        }
-        try:
-            for line in open(path, encoding="utf-8", errors="replace"):
-                try:
-                    e = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                t = e.get("type")
-                if t == "session":
-                    rec["cwd"] = e.get("cwd") or ""
-                    rec["created"] = _ms(e.get("timestamp"))
-                elif t == "session_info":
-                    rec["title"] = e.get("name") or rec["title"]
-                elif t == "message":
-                    msg = e.get("message") or {}
-                    role = msg.get("role")
-                    ts = _ms(e.get("timestamp")) or rec["last"]
-                    if role == "user":
-                        content = msg.get("content")
-                        txt = content if isinstance(content, str) else " ".join(
-                            c.get("text", "") for c in content or [] if isinstance(c, dict)
-                        )
-                        if not rec["task"]:
-                            rec["task"] = txt
-                        rec["turns"] += 1
-                    elif role == "assistant":
-                        tok, cost = _pi_usage_totals(msg)
-                        rec["tokens"] += tok
-                        rec["tok_in"] += int((msg.get("usage") or {}).get("input") or 0)
-                        rec["tok_out"] += int((msg.get("usage") or {}).get("output") or 0)
-                        rec["tok_cache"] += int((msg.get("usage") or {}).get("cacheRead") or 0)
-                        rec["cost_usd"] += cost
-                        if (msg.get("stopReason") or "") == "stop":
-                            rec["ended"] = True
-                        content = msg.get("content") or []
-                        txt = []
-                        for c in content if isinstance(content, list) else []:
-                            if c.get("type") == "text":
-                                txt.append(c.get("text", ""))
-                            elif c.get("type") == "toolCall":
-                                name = c.get("name") or "?"
-                                rec["tools"][name] = rec["tools"].get(name, 0) + 1
-                                rec["tool_calls"].append(
-                                    (ts, name, _one_line(json.dumps(c.get("arguments")), 140))
-                                )
-                        if txt:
-                            rec["last_text"] = "\n".join(txt)
-                elif t == "tool_execution_start":
-                    pass
-        except OSError:
-            continue
-        rec.setdefault("cwd", "")
-        rec["project"] = os.path.basename(rec["cwd"]) or "?"
-        rec["state"] = "done" if rec.get("ended") else "interrupted"
-        rec["start"] = rec["created"] or rec["last"]
-        rec["end"] = rec["last"]
-        rec["label"] = rec["title"] or rec["task"]
-        rec["kind"] = "one-shot"
-        out.append(rec)
+        rec = _parse_cached(path, lambda path=path: _parse_pi_session(path))
+        if rec is not None:
+            out.append(rec)
     return out
+
+
+def _finish_pi_rpc(rec, settled, name, path):
+    """存活判定依赖当前时间，缓存命中的记录每次都要重算。"""
+    alive = os.path.exists(path) and (time.time() - rec["last"] < 90)
+    rec["state"] = "RUNNING" if alive else ("done" if settled else "interrupted")
+    rec["project"] = f"pi-rpc:{name}"[:20]
+    rec["end"] = None if rec["state"] == "RUNNING" else (rec.get("ts_last") or rec["last"])
+    rec.pop("ts_last", None)
+    rec["cost_cny"] = cost_cny_of(rec["tok_in"], rec["tok_out"], rec["tok_cache"], rec["start"])
+    return _extend_running(rec)
+
+
+def _parse_pi_rpc(path, name):
+    rec = {
+        "worker": "Pi·rpc",
+        "path": path,
+        "key": name,
+        "state": "?",
+        "tokens": 0,
+        "tok_in": 0,
+        "tok_out": 0,
+        "tok_cache": 0,
+        "cost_usd": 0.0,
+        "title": name,
+        "task": "",
+        "last_text": "",
+        "created": os.path.getctime(path),
+        "last": os.path.getmtime(path),
+        "tool_calls": [],
+        "tools": {},
+        "steps": 0,
+        "turns": 0,
+        "kind": "rpc",
+        "settled": 0,
+    }
+    ts_first = 0.0
+    ts_last = 0.0
+    times = []
+    try:
+        for line in open(path, encoding="utf-8", errors="replace"):
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            t = e.get("type")
+            mts = _ms((e.get("message") or {}).get("timestamp")) or _ms(e.get("timestamp"))
+            if mts:
+                ts_first = ts_first or mts
+                ts_last = max(ts_last, mts)
+                times.append(mts)
+            if t == "message_start" or t == "message_end" or t == "turn_end":
+                msg = e.get("message") or {}
+                role = msg.get("role")
+                ts = _ms(e.get("timestamp")) or rec["last"]
+                if t == "turn_end" and role == "assistant":
+                    tok, cost = _pi_usage_totals(msg)
+                    rec["tokens"] += tok
+                    rec["tok_in"] += int((msg.get("usage") or {}).get("input") or 0)
+                    rec["tok_out"] += int((msg.get("usage") or {}).get("output") or 0)
+                    rec["tok_cache"] += int((msg.get("usage") or {}).get("cacheRead") or 0)
+                    rec["cost_usd"] += cost
+                    rec["turns"] += 1
+                    txt = " ".join(
+                        c.get("text", "") for c in msg.get("content") or [] if c.get("type") == "text"
+                    )
+                    if txt.strip():
+                        rec["last_text"] = txt
+                if role == "user":
+                    content = msg.get("content")
+                    txt = content if isinstance(content, str) else " ".join(
+                        c.get("text", "") for c in content or [] if isinstance(c, dict)
+                    )
+                    if txt.strip():
+                        rec["task"] = txt
+            elif t == "tool_execution_start":
+                ts = _ms(e.get("timestamp")) or rec["last"]
+                nm = e.get("toolName") or e.get("name") or "?"
+                rec["tools"][nm] = rec["tools"].get(nm, 0) + 1
+                rec["tool_calls"].append((ts, nm, _one_line(json.dumps(e.get("args") or e.get("input")), 140)))
+            elif t == "agent_settled":
+                rec["settled"] += 1
+            elif t == "agent_start":
+                rec["last_start"] = _ms(e.get("timestamp")) or rec["last"]
+    except OSError:
+        return None
+    rec["start"] = ts_first or rec["created"]
+    rec["ts_last"] = ts_last
+    rec["cost_usd"] = round(rec["cost_usd"], 6)
+    rec["segs"] = activity_segments(times)
+    return rec
 
 
 def scan_pi_rpc():
     out = []
     for path in glob.glob(os.path.join(PI_RPC_LOGS, "pi-rpc-*.jsonl")):
         name = re.sub(r"^pi-rpc-|\.jsonl$", "", os.path.basename(path))
-        rec = {
-            "worker": "Pi·rpc",
-            "path": path,
-            "key": name,
-            "state": "?",
-            "tokens": 0,
-            "tok_in": 0,
-            "tok_out": 0,
-            "tok_cache": 0,
-            "cost_usd": 0.0,
-            "title": name,
-            "task": "",
-            "last_text": "",
-            "created": os.path.getctime(path),
-            "last": os.path.getmtime(path),
-            "tool_calls": [],
-            "tools": {},
-            "steps": 0,
-            "turns": 0,
-            "kind": "rpc",
-        }
-        settled = 0
-        ts_first = 0.0
-        ts_last = 0.0
-        try:
-            for line in open(path, encoding="utf-8", errors="replace"):
-                try:
-                    e = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                t = e.get("type")
-                mts = _ms((e.get("message") or {}).get("timestamp")) or _ms(e.get("timestamp"))
-                if mts:
-                    ts_first = ts_first or mts
-                    ts_last = max(ts_last, mts)
-                if t == "message_start" or t == "message_end" or t == "turn_end":
-                    msg = e.get("message") or {}
-                    role = msg.get("role")
-                    ts = _ms(e.get("timestamp")) or rec["last"]
-                    if t == "turn_end" and role == "assistant":
-                        tok, cost = _pi_usage_totals(msg)
-                        rec["tokens"] += tok
-                        rec["tok_in"] += int((msg.get("usage") or {}).get("input") or 0)
-                        rec["tok_out"] += int((msg.get("usage") or {}).get("output") or 0)
-                        rec["tok_cache"] += int((msg.get("usage") or {}).get("cacheRead") or 0)
-                        rec["cost_usd"] += cost
-                        rec["turns"] += 1
-                        txt = " ".join(
-                            c.get("text", "") for c in msg.get("content") or [] if c.get("type") == "text"
-                        )
-                        if txt.strip():
-                            rec["last_text"] = txt
-                    if role == "user":
-                        content = msg.get("content")
-                        txt = content if isinstance(content, str) else " ".join(
-                            c.get("text", "") for c in content or [] if isinstance(c, dict)
-                        )
-                        if txt.strip():
-                            rec["task"] = txt
-                elif t == "tool_execution_start":
-                    ts = _ms(e.get("timestamp")) or rec["last"]
-                    nm = e.get("toolName") or e.get("name") or "?"
-                    rec["tools"][nm] = rec["tools"].get(nm, 0) + 1
-                    rec["tool_calls"].append((ts, nm, _one_line(json.dumps(e.get("args") or e.get("input")), 140)))
-                elif t == "agent_settled":
-                    settled += 1
-                elif t == "agent_start":
-                    rec["last_start"] = _ms(e.get("timestamp")) or rec["last"]
-        except OSError:
+        rec = _parse_cached(path, lambda path=path, name=name: _parse_pi_rpc(path, name))
+        if rec is None:
             continue
-        alive = os.path.exists(path) and (time.time() - rec["last"] < 90)
-        rec["state"] = "RUNNING" if alive else ("done" if settled else "interrupted")
-        rec["project"] = f"pi-rpc:{name}"[:20]
-        rec["start"] = ts_first or rec["created"]
-        rec["end"] = None if rec["state"] == "RUNNING" else (ts_last or rec["last"])
-        out.append(rec)
+        settled = rec.pop("settled", 0)
+        out.append(_finish_pi_rpc(rec, settled, name, path))
     return out
 
 
@@ -484,6 +604,14 @@ def scan_hermes(days=7, limit=40):
             from sessions s left join session_model_usage u on u.session_id = s.id
             where s.started_at >= ?
             group by s.id order by s.started_at desc limit ?""", (cut, limit)).fetchall()
+        # 每条会话的消息时间戳 → 活跃区间（"什么时候真的在跑"，而不是 created→last）
+        mt = {}
+        try:
+            for m in con.execute("select session_id, timestamp from messages where timestamp >= ? "
+                                 "order by timestamp", (cut,)):
+                mt.setdefault(m["session_id"], []).append(m["timestamp"])
+        except Exception:
+            mt = {}
         con.close()
     except Exception:
         return out
@@ -497,8 +625,14 @@ def scan_hermes(days=7, limit=40):
             "worker": "Hermes", "kind": "hermes", "key": r["id"], "path": "",
             "state": state, "tokens": int(r["tin"]) + int(r["tout"]) + int(r["tcache"]),
             "tok_in": int(r["tin"]), "tok_out": int(r["tout"]), "tok_cache": int(r["tcache"]),
+            "cost_cny": cost_cny_of(r["tin"], r["tout"], r["tcache"], r["started_at"]),
             "cost_usd": round(float(r["usd"]), 6), "title": label, "task": label, "label": label,
-            "project": f'hermes·{r["source"]}', "start": r["started_at"], "end": r["ended_at"] or 0.0,
+            # ended_at 为空（中断/崩溃的旧会话）时用最后一条消息时间收口，
+            # 否则 end=0 会让它看起来一直跑到"现在"——时间线和耗时都被拉成假长条
+            "project": f'hermes·{r["source"]}', "start": r["started_at"],
+            "end": r["ended_at"] or (last if state != "RUNNING" else 0.0),
+            "segs": activity_segments(mt.get(r["id"]) or [r["started_at"], last],
+                                      running=state == "RUNNING"),
             "turns": int(r["message_count"] or 0), "steps": 0, "tools": {}, "tool_calls": [],
             "last_text": "", "created": r["started_at"], "last": last, "last_start": last,
             "model": r["model"],
@@ -538,6 +672,8 @@ def scan_hermes_subagents(days=7):
         out.append({
             "worker": "Hermes·sub", "kind": "subagent", "key": r["delegation_id"], "path": "",
             "state": st, "tokens": tid + tout, "tok_in": tid, "tok_out": tout, "tok_cache": 0,
+            "cost_cny": cost_cny_of(tid, tout, 0, r["dispatched_at"]),
+            "segs": [[r["dispatched_at"], r["completed_at"] or r["dispatched_at"]]],
             "cost_usd": round(usd, 6), "title": goal[:120] or r["delegation_id"],
             "task": goal, "label": goal[:120] or r["delegation_id"], "project": "hermes·sub",
             "start": r["dispatched_at"], "end": r["completed_at"] or 0.0, "turns": 0, "steps": 0,
@@ -560,6 +696,7 @@ def scan_codex(days=7):
             continue
         rec = {"cwd": "", "task": "", "start": 0.0, "end": 0.0, "tin": 0, "tout": 0, "tcache": 0,
                "usd": 0.0, "last_text": ""}
+        times = []
         prev = None
         try:
             fh = open(path, encoding="utf-8", errors="replace")
@@ -601,6 +738,8 @@ def scan_codex(days=7):
                     rec["tin"] += uncached; rec["tout"] += d["output_tokens"]; rec["tcache"] += d["cached_input_tokens"]
                     rec["usd"] += uncached * 0.14e-6 + d["output_tokens"] * 4e-6 + d["cached_input_tokens"] * 0.014e-6
                     rec["end"] = max(rec["end"], ts or 0)
+                    if ts:
+                        times.append(ts)
                 elif t == "event_msg" and pl.get("type") == "task_started":
                     rec["start"] = rec["start"] or ts
         if not rec["start"]:
@@ -612,7 +751,10 @@ def scan_codex(days=7):
             "state": "done" if rec["end"] else "RUNNING",
             "tokens": rec["tin"] + rec["tout"] + rec["tcache"],
             "tok_in": rec["tin"], "tok_out": rec["tout"], "tok_cache": rec["tcache"],
-            "cost_usd": round(rec["usd"], 6), "title": label, "task": rec["task"], "label": label,
+            "cost_usd": round(rec["usd"], 6),
+            "cost_cny": cost_cny_of(rec["tin"], rec["tout"], rec["tcache"], rec["start"]),
+            "segs": activity_segments(times, running=not rec["end"]),
+            "title": label, "task": rec["task"], "label": label,
             "project": os.path.basename((rec["cwd"] or "?").rstrip("/")) or "?",
             "start": rec["start"], "end": rec["end"], "turns": 0, "steps": 0,
             "tools": {}, "tool_calls": [], "last_text": rec["last_text"],
@@ -655,30 +797,26 @@ def _dur(rec):
 
 
 def print_table(recs, limit, show_cost=True):
-    hdr = f"{'TIME':<15} {'DUR':>7}  {'WORKER':<7} {'PROJECT':<20} {'STATE':<11} {'TOKENS':>7} {'¥/$':>8}  {'KEY':<9} TASK"
+    hdr = f"{'TIME':<15} {'DUR':>7}  {'WORKER':<7} {'PROJECT':<20} {'STATE':<11} {'TOKENS':>7} {'≈¥':>8}  {'KEY':<9} TASK"
     print(hdr)
     print("-" * len(hdr))
     for r in recs[:limit]:
-        cost = ""
-        if r.get("worker") == "DSH":
-            cost = f"≈{r['cost_cny']:.2f}"
-        else:
-            cost = f"${r['cost_usd']:.4f}" if r.get("cost_usd") else "-"
+        cost = f"≈¥{r['cost_cny']:.2f}" if r.get("cost_cny") else "-"
         print(
             f"{_fmt_time(r['start']):<15} {_fmt_dur(_dur(r)):>7}  {r['worker']:<7} "
             f"{(r.get('project') or '-')[:20]:<20} {r['state']:<11} {_fmt_tok(r.get('tokens')):>7} "
             f"{cost:>8}  {r['key']:<9} {_one_line(r.get('label'), 60)}"
         )
     if show_cost:
-        print("\n≈¥ = 按 deepseek-flash 官方价（空闲 ¥1/¥4、高峰双倍）对会话内 usage 估算；$ = pi 自报成本。")
+        print("\n≈¥ = 六种执行者统一按 deepseek-flash 官方价估算（空闲：缓存 ¥0.02 / 输入 ¥1 / 输出 ¥4 每百万 token；北京工作日 9-12、14-18 双倍）。")
 
 
 def show(rec):
     print(f"KEY      {rec['key']}   [{rec['worker']}]  状态 {rec['state']}")
     print(f"项目     {rec.get('cwd') or rec.get('project')}")
     print(f"开始     {_fmt_time(rec['start'])}   耗时 {_fmt_dur(_dur(rec))}")
-    print(f"tokens   {rec.get('tokens')}   " + (
-        f"≈¥{rec['cost_cny']:.3f}" if rec['worker'] == 'DSH' else f"${rec.get('cost_usd', 0):.4f}"))
+    print(f"tokens   {rec.get('tokens')}   ≈¥{(rec.get('cost_cny') or 0):.3f}"
+          f"（上游自报 ${(rec.get('cost_usd') or 0):.4f}）")
     if rec.get("tools"):
         top = ", ".join(f"{k}×{v}" for k, v in sorted(rec["tools"].items(), key=lambda kv: -kv[1]))
         print(f"工具     {top}")

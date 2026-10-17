@@ -17,21 +17,26 @@ run history.
 
 | Block | What it shows |
 |---|---|
-| 4 KPI cards | running now · dispatches today · tokens today (cache included) · cost today |
+| 4 KPI cards | running now · dispatches today · tokens today (cache included) · cost today, split into DSH / Hermes / Pi·Codex so the visible parts add up to the total |
 | `TOKENS / 14D` | stacked cache / input / output bars per day, with the cost curve on top |
-| `TIMELINE / 7D` | every run as a band on a local 0–24h clock, coloured by worker |
+| `TIMELINE / 14D` | a local 0–24h timeline: one row per day, lanes packed by real concurrency; only **active intervals** are drawn (idle > 20 min splits a segment), so a session resumed the next day is not one fake 13-day bar. Header toggle: `ALL` / `DELEGATED` |
 | `PROJECTS` | tokens, run count and share per workspace |
 | `PROCESSES` | the agent processes actually running right now — real OS PID, project, elapsed, CPU, task |
 | `DELEGATION GRAPH` | orchestrator → worker → task nodes → workspace, one lane per dispatch; **hover a node to keep only its links lit**, click to pin, `Esc` to clear |
 | `NOW RUNNING` | the current task with its last tool calls, elapsed time, tokens, cost |
-| `RUN HISTORY` | every run: time, worker, project, task, state, tokens (12-cell bar), cost, duration |
+| `RUN HISTORY` | every run: time, worker, project, task, state, tokens (12-cell bar), cost (CNY; hover for the price basis and the token split), duration (active time) |
 
 Each card carries its own control in the panel header: the token chart picks its
-range (7 / 14 / 30 days), the timeline its own range, projects how many to show
-(4 / 6 / 10), the graph how many runs to draw (6 / 12 / 24), the history table its
-row count (20 / 50 / 100). The language switch (中文 / EN) sits under the clock.
-Everything is encoded in the URL, so a view is shareable:
-`?days=30&tdays=14&projs=4&graph=24&rows=100&lang=en`.
+range (7 / 14 / 30 days), the timeline its scope (all / delegated) and its own
+range, projects how many to show (4 / 6 / 10), the graph how many runs to draw
+(6 / 12 / 24), the history table its row count (20 / 50 / 100). The language switch
+(中文 / EN) sits under the clock. Everything is encoded in the URL, so a view is
+shareable: `?days=30&tdays=14&projs=4&graph=24&rows=100&lang=en&scope=all`.
+
+Switching a control swaps the DOM in place instead of navigating: hovering a chip
+prefetches that variant (~0.1 s), so the click lands immediately and the scroll
+position is kept. The server reuses one collection for 4 s and caches per-file
+parsing by mtime, so a range switch is a re-render, not a re-scan of every session.
 
 ### Reading the delegation graph
 
@@ -43,19 +48,9 @@ Everything is encoded in the URL, so a view is shareable:
   `p:<project>` a workspace.
 
 Refresh is a plain `<meta http-equiv="refresh">` — no JS framework, no build
-step, no network calls. The page is regenerated on every request, so what you
-see is always the state of the logs at that moment.
-
-### Reading the delegation graph
-
-- Hover any node — `HERMES`, a worker, a single task row, or a workspace — and
-  only its links stay lit; everything else fades to 12% opacity. On a busy day
-  this is the difference between a diagram and spaghetti.
-- Click a node to **pin** the focus; auto-refresh pauses while something is
-  pinned so the view does not jump out from under the pointer. `Esc` (or a click
-  on empty space) clears it.
-- `?focus=w:DSH` pins from the URL: `t:<key>` a task, `w:<worker>` a worker,
-  `p:<project>` a workspace. Useful for sharing a view or taking screenshots.
+step, no network calls. The page is re-rendered on every request (the collection
+is reused for 4 s and per-file parsing is cached by mtime), so what you see is
+always the state of the logs at that moment.
 
 ## Quick start
 
@@ -80,6 +75,9 @@ Options:
 | `--days N` | chart range: 7, 14 or 30 |
 | `--rows N` | history rows: 20, 50 or 100 |
 | `--graph N` | runs drawn in the delegation graph: 6, 12 or 24 |
+| `--tdays N` | timeline days: 7, 14 or 30 |
+| `--projs N` | projects shown: 4, 6 or 10 |
+| `--scope all\|dg` | timeline scope: `all` includes the Hermes main loop, `dg` only delegated work |
 | `--serve PORT` | serve on 127.0.0.1 and re-collect on each request |
 | `--demo` | synthetic sessions — safe for screenshots, reads no local files |
 | `--refresh N` | auto-reload interval in seconds (default 5, `0` disables) |
@@ -111,13 +109,25 @@ plus the session's own bookkeeping, not from guessing.
 
 ## Cost model
 
-- **DSH** — token usage × DeepSeek list price: ¥1/M input, ¥4/M output,
-  ¥0.02/M cache hit; peak hours (weekday 09–12 and 14–18, Beijing) are doubled.
-- **Pi / Pi RPC** — the cost the CLI itself reports (USD), shown as `$`.
+**All six workers use one price table and one currency (CNY).** Mixing "DSH in ¥,
+Pi in $, Hermes in $" is why the old cost card made no sense — those numbers
+cannot be added, and the headline only covered DSH.
 
-Costs are estimates, not invoices: they are computed from usage counters the
-agents log, and a session that was resumed several times is charged once per
-call it made.
+- Price: deepseek-flash list price — ¥0.02/M cache hit, ¥1/M uncached input,
+  ¥4/M output; doubled during peak hours (weekdays 09–12 and 14–18, Beijing).
+- Derived from tokens: `cache × 0.02 + input × 1 + output × 4` (CNY, then ×2 in
+  peak hours). Peak/idle is decided from the session start time, so a very long
+  session that spans both is an approximation.
+- The KPI card lists **DSH / Hermes (main loop + sub-agents) / Pi·Codex**, and the
+  three visible numbers add up to the total. Hover it for the price basis and the
+  "this is not an invoice" note.
+- Costs in the run table are CNY too; hover a row to see its token split and the
+  upstream self-reported `$`.
+
+These are estimates, not invoices: they come from the usage counters each agent
+logs, not from DeepSeek's billing. Hermes' own `estimated_cost_usd` uses a
+different (older) USD table, so it is no longer mixed in — everything is
+recomputed from the CNY price above.
 
 ## Privacy
 

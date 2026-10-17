@@ -56,17 +56,47 @@ def human_tok(n):
     return f"{n / 1e6:.1f}M"
 
 
+FX = 7.1          # 美元→人民币，只用于兼容旧记录里只有 $ 的情况
+PRICE_NOTE = "deepseek-flash 官价：缓存 ¥0.02 / 输入 ¥1 / 输出 ¥4 每百万 token，北京工作日 9-12、14-18 双倍"
+
+
+def rec_cny(r):
+    """统一人民币口径：六种执行者都算 cost_cny（worker_runs 统一按官价估）。"""
+    if r.get("cost_cny") is not None:
+        return r.get("cost_cny") or 0.0
+    return (r.get("cost_usd") or 0.0) * FX
+
+
 def cost_text(r):
-    if r.get("worker") == "DSH":
-        return f"≈¥{r.get('cost_cny', 0):.2f}"
-    c = r.get("cost_usd") or 0
-    return f"${c:.4f}" if c else "—"
+    v = rec_cny(r)
+    if not v:
+        return "—"
+    return f"≈¥{v:.3f}" if v < 0.01 else f"≈¥{v:.2f}"
+
+
+def cost_tip(r):
+    """悬停说明这行钱是怎么来的：谁、多少 token、按什么价。"""
+    v = rec_cny(r)
+    usd = r.get("cost_usd") or 0
+    parts = [f"{r.get('worker')} · {cost_text(r)}（估算）",
+             f"缓存 {r.get('tok_cache') or 0:,} / 输入 {r.get('tok_in') or 0:,} / 输出 {r.get('tok_out') or 0:,} tokens"]
+    if r.get("worker") != "DSH" and usd:
+        parts.append(f"上游自报 ${usd:.4f}")
+    parts.append(PRICE_NOTE)
+    return " · ".join(parts)
+
+
+def dur_sec(r):
+    """活跃时长：有活跃区间就用区间之和（空闲 >20min 断开），否则退回 end-start。"""
+    segs = r.get("segs")
+    if segs:
+        return W.seg_seconds(segs)
+    end = r.get("end") or time.time()
+    return max(0, end - (r.get("start") or end))
 
 
 def dur_text(r):
-    end = r.get("end") or time.time()
-    sec = max(0, end - (r.get("start") or end))
-    sec = int(sec)
+    sec = int(dur_sec(r))
     if r["state"] == "RUNNING":
         return f"{sec // 60}m{sec % 60:02d}s"
     if sec < 60:
@@ -371,6 +401,10 @@ h1 .rule{display:block;width:148px;height:4px;margin-top:12px;
 .stat .lcd{margin:13px 0 10px}
 .stat .c{font-size:11.5px;color:var(--ink-2)}
 .stat.hot{border-color:var(--ink);background:#FFF8E6}
+.stat .c2{display:flex;justify-content:space-between;gap:6px;font-size:10px;color:var(--ink-2);
+  font-variant-numeric:tabular-nums;margin-top:6px;letter-spacing:-.01em;white-space:nowrap}
+.stat .c2 b{font-weight:600;color:#33342E}
+.stat .c2.dim{color:var(--ink-3);font-size:10px;margin-top:4px;justify-content:flex-start}
 
 .panel{background:var(--panel);border:2px solid var(--line);box-shadow:5px 5px 0 var(--line)}
 .panel+.panel{margin-top:22px}
@@ -447,7 +481,8 @@ def state_label(st):
     return T(STATE_KEY.get(st, "st_done"))
 PIXEL_WORKER = {"DSH": "b-dsh", "Pi": "b-pi", "Pi·rpc": "b-rpc",
                 "Hermes": "b-hermes", "Hermes·sub": "b-sub", "Codex": "b-codex"}
-PIX_HERMES = "#23242A"
+WORKER_ORDER = ["DSH", "Pi", "Pi·rpc", "Hermes", "Hermes·sub", "Codex"]
+PIX_HERMES = "#3E4E66"
 PIX_SUB = "#B0472F"
 PIX_CODEX = "#157A5B"
 
@@ -475,7 +510,7 @@ PIX_IN = "#6C55A8"
 PIX_OUT = "#23242A"
 PIX_DSH = "#5A4B8C"
 PIX_PI = "#0E7C86"
-PIX_RPC = "#A9710A"
+PIX_RPC = "#B5820E"
 PIX_OK = "#2C8C57"
 PIX_HALT = "#A9710A"
 PIX_BAD = "#C7413B"
@@ -483,7 +518,7 @@ PIX_GRID = "#D9D2BF"
 PIX_AXIS = "#5E6057"
 
 
-def _t(x, y, txt, size=7, fill=PIX_AXIS, anchor="start"):
+def _t(x, y, txt, size=7.0, fill=PIX_AXIS, anchor="start"):
     return (f'<text x="{x:.1f}" y="{y:.1f}" font-family="PS2P,monospace" font-size="{size}" '
             f'fill="{fill}" text-anchor="{anchor}">{e(txt)}</text>')
 
@@ -534,7 +569,7 @@ def chart_daily(recs, days=14, w=520, h=200):
             agg[d][0] += r.get("tok_cache") or 0
             agg[d][1] += r.get("tok_in") or 0
             agg[d][2] += r.get("tok_out") or 0
-            agg[d][3] += (r.get("cost_cny") or 0) + (r.get("cost_usd") or 0) * 7.1
+            agg[d][3] += rec_cny(r)
     maxv = _nice(max([sum(v[:3]) for v in agg.values()] + [1]))
     maxc = _nice(max([v[3] for v in agg.values()] + [0.0001]))
     pl, pr, pt, pb = 60, 58, 12, 24
@@ -583,42 +618,108 @@ def chart_daily(recs, days=14, w=520, h=200):
                   _ctl_grp("days", [(7, "7D"), (14, "14D"), (30, "30D")], days))
 
 
-def chart_gantt(recs, days=7, w=520, h=216):
+def chart_gantt(recs, days=7, scope="all", w=520):
+    """时间线：一天一行，行内按真实并发分道（lane packing）。
+
+    旧版把同一天的会话全画在一条水平线上，后画的覆盖先画的 —— 十几个会话叠成一条黑条，
+    既看不出几次也看不出谁。现在同一天不重叠的会话排同一道，重叠的往下加道。
+    """
     now = datetime.now(TZ)
     keys = [(now - timedelta(days=i)).date() for i in range(days - 1, -1, -1)]
-    pl, pr, pt, pb = 56, 10, 12, 22
-    pw, ph = w - pl - pr, h - pt - pb
-    row_h = ph / days
+    rows = {d: [] for d in keys}
+    for r in recs:
+        if scope == "dg" and r.get("worker") == "Hermes":
+            continue
+        segs = r.get("segs") or [[r["start"], r.get("end") or time.time()]]
+        for a, b in segs:
+            if b <= a:
+                b = a + 45
+            cur = a
+            while True:                                  # 跨零点的一段按天切开
+                d = datetime.fromtimestamp(cur, TZ).date()
+                midnight = datetime.combine(d, datetime.min.time(), tzinfo=TZ).timestamp()
+                if d in rows:
+                    s0 = max(0.0, min(86390.0, cur - midnight))
+                    s1 = max(s0 + 45, min(86400.0, b - midnight))
+                    rows[d].append((s0, s1, r))
+                if b <= midnight + 86400:
+                    break
+                cur = midnight + 86400
+
+    lane_h, lane_gap, row_pad = 5.0, 1.4, 9.0
+    layout, row_h = {}, {}
+    for d in keys:
+        lanes, placed = [], []
+        for s0, s1, r in sorted(rows[d], key=lambda x: (x[0], x[1])):
+            for i, le in enumerate(lanes):
+                if s0 >= le:
+                    lanes[i] = s1
+                    placed.append((i, s0, s1, r))
+                    break
+            else:
+                lanes.append(s1)
+                placed.append((len(lanes) - 1, s0, s1, r))
+        layout[d] = (max(1, len(lanes)), placed)
+        row_h[d] = max(18.0, len(lanes) * (lane_h + lane_gap) + row_pad)
+
+    pl, pr, pt, pb = 66, 14, 10, 24
+    h = pt + sum(row_h.values()) + pb
+    pw = w - pl - pr
     out = []
     for hh in range(0, 25, 6):
         x = pl + pw * hh / 24
-        out.append(f'<line x1="{x:.1f}" y1="{pt}" x2="{x:.1f}" y2="{pt + ph}" stroke="{PIX_GRID}" stroke-width="1" stroke-dasharray="2 3"/>')
-        out.append(_t(x, h - 7, str(hh), 7, PIX_AXIS, "middle"))
-    for i, d in enumerate(keys):
-        y = pt + row_h * (i + 0.5)
-        out.append(_t(pl - 8, y + 2.5, f"{d:%m/%d}", 7.5, PIX_AXIS, "end"))
-        out.append(f'<line x1="{pl}" y1="{y:.1f}" x2="{w - pr}" y2="{y:.1f}" stroke="#EFEADA" stroke-width="1"/>')
-        for r in recs:
-            st = datetime.fromtimestamp(r["start"], TZ)
-            if st.date() != d:
-                continue
-            end = r.get("end") or time.time()
-            dur = max(90, end - r["start"])
-            x0 = pl + pw * (st.hour * 3600 + st.minute * 60 + st.second) / 86400
-            bw = max(3.0, pw * dur / 86400)
-            x1 = min(x0 + bw, w - pr)
+        out.append(f'<line x1="{x:.1f}" y1="{pt}" x2="{x:.1f}" y2="{h - pb}" '
+                   f'stroke="{PIX_GRID}" stroke-width="1" stroke-dasharray="2 3"/>')
+        out.append(_t(x, h - 9, str(hh), 7, PIX_AXIS, "middle"))
+
+    y0 = pt
+    n_runs, max_lane, seen = 0, 1, set()
+    for d in keys:
+        nlanes, placed = layout[d]
+        max_lane = max(max_lane, nlanes)
+        out.append(f'<line x1="{pl}" y1="{y0:.1f}" x2="{w - pr}" y2="{y0:.1f}" '
+                   f'stroke="#DED7C6" stroke-width="1"/>')
+        out.append(_t(pl - 8, y0 + 9.5, f"{d:%m/%d}", 7.5, PIX_AXIS, "end"))
+        if placed:
+            runs = {(id(r), r["key"]) for _, _, _, r in placed}
+            out.append(_t(pl - 8, y0 + 19, T("tl_segs", len(placed)), 6, "#9A9280", "end"))
+            seen |= runs
+        for lane, s0, s1, r in placed:
+            bx = pl + pw * s0 / 86400
+            bw = max(2.6, min(pw * (s1 - s0) / 86400, w - pr - bx))
+            by = y0 + 4 + lane * (lane_h + lane_gap)
             col = worker_color(r["worker"])
-            op = 0.45 if r["state"] in ("interrupted", "aborted") else 1
-            tip = f"{st:%m-%d %H:%M} → {datetime.fromtimestamp(end, TZ):%H:%M} · {r['worker']} · {clean_title(r.get('label'))[:40]} · {r['state']}"
-            out.append(f'<rect x="{x0:.1f}" y="{y - 6:.1f}" width="{max(2.5, x1 - x0):.1f}" height="12" '
-                       f'fill="{col}" opacity="{op}">{_tip(tip)}</rect>')
-    legend = ('<span><i style="background:%s"></i>DSH</span>'
-              '<span><i style="background:%s"></i>Pi</span>'
-              '<span><i style="background:%s"></i>Pi·rpc</span>'
-              '<span><i style="background:#B9B2A0"></i>' + T("dim_halt") + '</span>') % (PIX_DSH, PIX_PI, PIX_RPC)
-    svg = f'<svg viewBox="0 0 {w} {h}">{"".join(out)}</svg>'
-    return _panel(T("p_timeline", days), T("h_timeline"), svg, legend,
-                  _ctl_grp("tdays", [(7, "7D"), (14, "14D"), (30, "30D")], days))
+            op = 0.42 if r["state"] in ("interrupted", "aborted") else 1
+            mid = datetime.combine(d, datetime.min.time(), tzinfo=TZ)
+            t_a = (mid + timedelta(seconds=s0)).strftime("%H:%M")
+            t_b = (mid + timedelta(seconds=s1)).strftime("%H:%M")
+            tip = (f"{d:%m/%d} {t_a}→{t_b} · {r['worker']} · {state_label(r['state'])}"
+                   f" · {clean_title(r.get('label'))[:46]}"
+                   f" · 活跃 {dur_text(r)}（{len(r.get('segs') or []) or 1} 段） · {cost_text(r)}")
+            out.append(f'<rect x="{bx:.1f}" y="{by:.1f}" width="{bw:.1f}" height="{lane_h}" '
+                       f'fill="{col}" fill-opacity="{op}" stroke="#141519" stroke-width="0.35" '
+                       f'stroke-opacity="0.45">{_tip(tip)}</rect>')
+        y0 += row_h[d]
+    out.append(f'<line x1="{pl}" y1="{y0:.1f}" x2="{w - pr}" y2="{y0:.1f}" '
+               f'stroke="#DED7C6" stroke-width="1"/>')
+    n_runs = len(seen)
+
+    cnt, counted = {}, set()
+    for d in keys:
+        for _, _, _, r in layout[d][1]:
+            k = (id(r), r.get("key"))
+            if k in counted:
+                continue
+            counted.add(k)
+            cnt[r["worker"]] = cnt.get(r["worker"], 0) + 1
+    legend = "".join(
+        f'<span><i style="background:{worker_color(wk)}"></i>{wk} <b>{cnt[wk]}</b></span>'
+        for wk in WORKER_ORDER if cnt.get(wk))
+    legend += f'<span><i style="background:#B9B2A0"></i>{T("dim_halt")}</span>'
+    svg = f'<svg viewBox="0 0 {w} {h:.0f}">{"".join(out)}</svg>'
+    ctl = (_ctl_grp("scope", [("all", T("sc_all")), ("dg", T("sc_dg"))], scope) +
+           _ctl_grp("tdays", [(7, "7D"), (14, "14D"), (30, "30D")], days))
+    return _panel(T("p_timeline", days), T("tl_lanes", n_runs, max_lane), svg, legend, ctl)
 
 
 def chart_projects(recs, w=520, h=200, top=6):
@@ -738,6 +839,11 @@ def chart_network(recs, w=1040, h=560, n=12):
             workers.append(r["worker"])
 
     top, bot = 78, h - 50
+    n_work = len({r["worker"] for r in items})
+    n_proj = len({(r.get("project") or "?") for r in items})
+    # 任务卡 28px 高，聚合节点 28px 高：画布不够高就长高，绝不让卡片互相压住
+    h = max(h, top + 32 * (len(items) - 1) + 62, top + 34 * max(n_work, n_proj) + 70)
+    bot = h - 50
     step = (bot - top) / max(len(items) - 1, 1)
     ty = [top + i * step for i in range(len(items))]
 
@@ -747,12 +853,30 @@ def chart_network(recs, w=1040, h=560, n=12):
     bus = 702
     px, pw_ = 772, 246
 
+    def _spread(groups, gap=34.0):
+        """把同一列的聚合节点摊开。
+
+        位置取该组任务的均值是"最像中心"的，但两个组均值接近时会完全重叠
+        （Hermes 压在 Pi·rpc 上就是这样）。按目标位置排序后依次顶开，再整体夹回画布内。
+        """
+        order = sorted(groups.items(), key=lambda kv: (sum(kv[1]) / len(kv[1]), str(kv[0])))
+        ys = [min(max(sum(v) / len(v), top), bot) for _, v in order]
+        for _ in range(3):
+            for i in range(1, len(ys)):
+                ys[i] = max(ys[i], ys[i - 1] + gap)
+            if ys and ys[-1] > bot:
+                shift = ys[-1] - bot
+                ys = [y - shift for y in ys]
+            if ys and ys[0] < top:
+                ys[0] = top
+        return {order[i][0]: ys[i] for i in range(len(order))}
+
     wy, py = {}, {}
     for i, r in enumerate(items):
         wy.setdefault(r["worker"], []).append(ty[i])
         py.setdefault(r["project"] or "?", []).append(ty[i])
-    wy = {k: sum(v) / len(v) for k, v in wy.items()}
-    py = {k: sum(v) / len(v) for k, v in py.items()}
+    wy = {k: v - 14 for k, v in _spread(wy).items()}
+    py = {k: v - 14 for k, v in _spread(py).items()}
 
     out = [NET_MARK]
 
@@ -797,7 +921,7 @@ def chart_network(recs, w=1040, h=560, n=12):
                f'<rect x="{hub["x"]}" y="{hub["y"]}" width="{hub["w"]}" height="{hub["h"]}" fill="#141519"/>'
                f'{_t(hub["x"] + hub["w"] / 2, hub["y"] + 19, "HERMES", 9, "#F2EEE3", "middle")}'
                f'{_t(hub["x"] + hub["w"] / 2, hub["y"] - 8, "ORCHESTRATOR", 6.5, PIX_AXIS, "middle")}'
-               f'{_t(hub["x"] + hub["w"] / 2, hub["y"] + hub["h"] + 14, f"{len(recs)} RUNS", 6.5, PIX_AXIS, "middle")}'
+               f'{_t(hub["x"] + hub["w"] / 2, hub["y"] + hub["h"] + 14, T("runs_tag", len(items)), 6.5, PIX_AXIS, "middle")}'
                f'</g>')
 
     # worker
@@ -857,9 +981,9 @@ def network_block(recs, graph_n=12):
     return f'<div class="grid1">{chart_network(recs, n=graph_n)}</div>'
 
 
-def charts_html(recs, days=14, graph_n=12, procs=None, tdays=7, projs=6):
+def charts_html(recs, days=14, graph_n=12, procs=None, tdays=7, projs=6, scope="all"):
     last = chart_durations(recs) if procs is None else processes_panel(procs, recs)
-    grid = (chart_daily(recs, days=days) + chart_gantt(recs, days=tdays) +
+    grid = (chart_daily(recs, days=days) + chart_gantt(recs, days=tdays, scope=scope) +
             chart_projects(recs, top=projs) + last)
     return f'<div class="grid2">{grid}</div>'
 
@@ -880,6 +1004,8 @@ I18N = {
         "th_cpu": "CPU", "th_task": "任务",
         "range": "范围", "rows": "行数", "graph": "拓扑", "lang": "语言",
         "cost_axis": "花费（右轴 ¥）", "dim_halt": "淡色=中断", "total": "合计",
+        "k_cost_est": "官价估算·非实付", "sc_all": "全部", "sc_dg": "只看派活",
+        "tl_lanes": "%d 条会话 · 最多 %d 道", "tl_segs": "%d 段", "p_now_runs": "%d 条在窗内",
         "bus": "竖线=同一项目汇聚 · 左→右=委派方向",
         "untitled": "（无标题）",
         "ctl_static": "静态快照 · 用 --serve 才能切换",
@@ -890,9 +1016,10 @@ I18N = {
         "p_proc": "进程", "p_now": "正在运行", "p_hist": "运行流水",
         "th_time": "时间", "th_worker": "执行者", "th_project": "项目", "th_task": "任务",
         "th_state": "状态", "th_tokens": "TOKEN", "th_cost": "花费", "th_dur": "耗时",
+        "dur_tip": "活跃时长：按事件流分段的实际活动时间，空闲超过 20 分钟断开（会话被隔天恢复时不会算成一整段）",
         "st_run": "在跑", "st_done": "完成", "st_halt": "中断", "st_abort": "中止", "st_fail": "失败",
-        "foot_detail": "DETAIL: worker_runs.py show <KEY> · ¥ = 按 deepseek-flash 官价估算",
-        "kpi_run": "在跑", "kpi_runs": "今日派活", "kpi_tok": "TOKEN", "kpi_cost": "花费",
+        "foot_detail": "DETAIL: worker_runs.py show <KEY> · ¥ = deepseek-flash 官价估算（高峰 2×，非账单实付）",
+        "kpi_run": "在跑", "kpi_runs": "今日派活", "kpi_tok": "TOKEN", "kpi_cost": "今日花费（估）",
         "kicker": "执行日志", "kicker2": "串行监控", "local_time": "本地时间", "sync": "同步",
         "lg_cache": "缓存", "lg_input": "输入", "lg_output": "输出",
         "max_label": "峰值 %s", "orch": "编排", "runs_tag": "%d 次",
@@ -911,6 +1038,8 @@ I18N = {
         "th_cpu": "CPU", "th_task": "TASK",
         "range": "RANGE", "rows": "ROWS", "graph": "GRAPH", "lang": "LANG",
         "cost_axis": "cost (right axis ¥)", "dim_halt": "dim = interrupted", "total": "total",
+        "k_cost_est": "est. · not billed", "sc_all": "ALL", "sc_dg": "DELEGATED",
+        "tl_lanes": "%d sessions · up to %d lanes", "tl_segs": "%d seg", "p_now_runs": "%d in view",
         "bus": "bar = project bus · left→right = dispatch",
         "untitled": "(untitled)",
         "ctl_static": "static snapshot · run with --serve to switch",
@@ -921,9 +1050,10 @@ I18N = {
         "p_proc": "PROCESSES", "p_now": "NOW RUNNING", "p_hist": "RUN HISTORY",
         "th_time": "TIME", "th_worker": "WORKER", "th_project": "PROJECT", "th_task": "TASK",
         "th_state": "STATE", "th_tokens": "TOKENS", "th_cost": "COST", "th_dur": "DUR",
+        "dur_tip": "active time: event-stream segments, split when idle > 20 min (a session resumed next day is not one long run)",
         "st_run": "RUNNING", "st_done": "DONE", "st_halt": "HALT", "st_abort": "ABORT", "st_fail": "FAIL",
-        "foot_detail": "DETAIL: worker_runs.py show <KEY> · ¥ = EST. @ DEEPSEEK-FLASH",
-        "kpi_run": "RUNNING", "kpi_runs": "TODAY RUNS", "kpi_tok": "TOKENS", "kpi_cost": "COST",
+        "foot_detail": "DETAIL: worker_runs.py show <KEY> · ¥ = EST. @ DEEPSEEK-FLASH LIST PRICE (PEAK 2×, NOT BILLED)",
+        "kpi_run": "RUNNING", "kpi_runs": "TODAY RUNS", "kpi_tok": "TOKENS", "kpi_cost": "COST TODAY (EST.)",
         "kicker": "EXECUTION LOG", "kicker2": "SERIAL MONITOR", "local_time": "LOCAL TIME", "sync": "SYNC",
         "lg_cache": "cache", "lg_input": "input", "lg_output": "output",
         "max_label": "MAX %s", "orch": "ORCHESTRATOR", "runs_tag": "%d RUNS",
@@ -946,6 +1076,8 @@ CTL_CSS = """
 .pctl a{border:1.5px solid #141519;background:#FBF8EE;color:#141519;padding:2px 5px;
         text-decoration:none;font-family:'PS2P',monospace;font-size:7px;box-shadow:1.5px 1.5px 0 #141519}
 .pctl a.on{background:#141519;color:#FBF8EE}
+.pctl a.busy{opacity:.45;transform:translate(1px,1px);box-shadow:none}
+.pctl a.busy:after{content:"…"}
 .pctl a:hover{transform:translate(-1px,-1px);box-shadow:2.5px 2.5px 0 #141519}
 .ctl{display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin:10px 0 4px;
      font-family:'PS2P',monospace;font-size:8px;color:var(--ink-3)}
@@ -967,7 +1099,7 @@ svg.net.hasfocus .gn.hl rect{stroke-width:3}
 
 NET_JS = """
 <script>
-(function(){
+window.__netInit = function(){
   var svg = document.querySelector('svg.net');
   if(!svg) return;
   var edges = [].slice.call(svg.querySelectorAll('.eg'));
@@ -1023,11 +1155,85 @@ NET_JS = """
     apply();
     if(pinned) pause(); else resume();
   });
-  document.addEventListener('keydown', function(e){
-    if(e.key === 'Escape'){ pinned = null; hovered = null; apply(); resume(); }
-  });
+  window.__netReset = function(){ pinned = null; hovered = null; apply(); resume(); };
   var q = (location.search.match(/[?&]focus=([^&]+)/) || [])[1];
   if(q){ pinned = decodeURIComponent(q); apply(); pause(); }
+};
+if(!window.__netKey){
+  window.__netKey = function(ev){ if(ev.key === 'Escape' && window.__netReset) window.__netReset(); };
+  document.addEventListener('keydown', window.__netKey);
+}
+window.__netInit();
+</script>
+"""
+
+# 范围/行数切换：预取 + 原地换 DOM，不再整页重新导航（保留滚动位置，点下去立刻有反馈）
+SWAP_JS = """
+<script>
+(function(){
+  if(location.protocol === 'file:') return;
+  var cache = {}, order = [], inflight = {}, token = 0;
+  function ctlOf(el){ return (el && el.closest) ? el.closest('.pctl a') : null; }
+  function remember(url, html){
+    if(!html || cache[url]) return;
+    cache[url] = html; order.push(url);
+    if(order.length > 24) delete cache[order.shift()];
+  }
+  function prefetch(url){
+    if(!url || cache[url] || inflight[url]) return;
+    inflight[url] = 1;
+    fetch(url, {credentials:'same-origin'})
+      .then(function(r){ return r.ok ? r.text() : ''; })
+      .then(function(t){ remember(url, t); })
+      .catch(function(){})
+      .then(function(){ delete inflight[url]; });
+  }
+  function applyDoc(url, html){
+    var doc = new DOMParser().parseFromString(html, 'text/html');
+    if(!doc.body){ location.href = url; return; }
+    var y = window.scrollY;
+    var om = document.querySelector('meta[http-equiv=refresh]');
+    var nm = doc.querySelector('meta[http-equiv=refresh]');
+    if(om) om.parentNode.removeChild(om);                 // 换视图重算自刷计时，别刚换完就整页刷
+    if(nm){
+      var m = document.createElement('meta');
+      m.setAttribute('http-equiv','refresh'); m.setAttribute('content', nm.getAttribute('content'));
+      document.head.appendChild(m);
+    }
+    document.title = doc.title || document.title;
+    if(doc.documentElement && doc.documentElement.lang) document.documentElement.lang = doc.documentElement.lang;
+    document.body.innerHTML = doc.body.innerHTML;
+    window.scrollTo(0, y);
+    try{ history.pushState(null, '', url); }catch(e){}
+    if(window.__netInit) window.__netInit();
+  }
+  document.addEventListener('mouseover', function(ev){
+    var a = ctlOf(ev.target);
+    if(a) prefetch(a.getAttribute('href'));
+  });
+  document.addEventListener('click', function(ev){
+    var a = ctlOf(ev.target);
+    if(!a || ev.metaKey || ev.ctrlKey || ev.shiftKey || (ev.button || 0) > 0) return;
+    var url = a.getAttribute('href');
+    if(!url || url.charAt(0) === '#' || a.classList.contains('on')) return;
+    ev.preventDefault();
+    var old = document.querySelector('.pctl a.busy');
+    if(old) old.classList.remove('busy');
+    a.classList.add('busy');
+    var my = ++token;
+    function done(html){
+      if(my !== token) return;                            // 连点只认最后一次
+      a.classList.remove('busy');
+      remember(url, html);
+      applyDoc(url, html);
+    }
+    if(cache[url]){ done(cache[url]); return; }
+    fetch(url, {credentials:'same-origin'})
+      .then(function(r){ if(!r.ok) throw new Error('http'); return r.text(); })
+      .then(done)
+      .catch(function(){ location.href = url; });
+  });
+  window.addEventListener('popstate', function(){ location.reload(); });
 })();
 </script>
 """
@@ -1095,10 +1301,10 @@ def processes_panel(procs, recs):
 
 
 def render_pixel(recs, refresh, lang="zh", days=14, rows=20, graph_n=12, procs=None, cur=None,
-                 tdays=7, projs=6):
+                 tdays=7, projs=6, scope="all"):
     LANG["v"] = "en" if lang == "en" else "zh"
     cur = cur or {"lang": lang, "days": days, "rows": rows, "graph": graph_n,
-                  "tdays": tdays, "projs": projs}
+                  "tdays": tdays, "projs": projs, "scope": scope}
     CUR.clear(); CUR.update(cur)
     procs = procs or []
     row_limit = int(rows)
@@ -1107,8 +1313,18 @@ def render_pixel(recs, refresh, lang="zh", days=14, rows=20, graph_n=12, procs=N
     running = [r for r in recs if r["state"] == "RUNNING"]
     today_recs = [r for r in recs if datetime.fromtimestamp(r["start"], TZ).date() == today]
     tok_today = sum(r.get("tokens") or 0 for r in today_recs)
-    cny_today = sum(r.get("cost_cny") or 0 for r in today_recs if r["worker"] == "DSH")
-    usd_today = sum(r.get("cost_usd") or 0 for r in today_recs if r["worker"] != "DSH")
+    grp_today = {"DSH": 0.0, "Hermes": 0.0, "Pi": 0.0}
+    for r in today_recs:
+        w = r.get("worker") or ""
+        g = "DSH" if w == "DSH" else ("Hermes" if w.startswith("Hermes") else "Pi")
+        grp_today[g] += rec_cny(r)
+    cny_today = sum(grp_today.values())
+    grp_today = {k: round(v, 2) for k, v in grp_today.items()}
+    cny_today = round(sum(grp_today.values()), 2)   # 先各自四舍五入再加：明细相加必须等于合计
+    cost_break = " · ".join(f"{k} ¥{v:.2f}" for k, v in grp_today.items() if v)
+    cost_today_tip = (f"今日 0:00 起 · 估算合计 ¥{cny_today:.2f}（{cost_break}）· "
+                      f"Pi 组含 Pi/Pi·rpc/Codex，Hermes 组含主循环与子 agent · {PRICE_NOTE} · "
+                      f"只是按 token 单价推算，不是账单实付")
     maxtok = max([r.get("tokens") or 0 for r in recs] + [1])
 
     head = f"""<!doctype html><html lang="{'zh-CN' if lang == 'zh' else 'en'}"><head><meta charset="utf-8">
@@ -1145,13 +1361,15 @@ def render_pixel(recs, refresh, lang="zh", days=14, rows=20, graph_n=12, procs=N
     <div class="row1"><span class="k px">{T("kpi_tok")}</span>{sprite('chip')}</div>
     <div class="lcd"><div class="v px">{human_tok(tok_today).upper()}</div></div><div class="c">{T("k_tok")}</div>
   </div>
-  <div class="stat">
+  <div class="stat" title="{e(cost_today_tip)}">
     <div class="row1"><span class="k px">{T("kpi_cost")}</span>{sprite('coin')}</div>
-    <div class="lcd"><div class="v px">¥{cny_today:.2f}</div></div><div class="c">{T("k_cost_pi", usd_today) if usd_today else T("k_cost_plain")}</div>
+    <div class="lcd"><div class="v px">≈¥{cny_today:.2f}</div></div>
+    <div class="c2"><span>DSH <b>¥{grp_today['DSH']:.2f}</b></span><span>Hermes <b>¥{grp_today['Hermes']:.2f}</b></span><span>Pi/Codex <b>¥{grp_today['Pi']:.2f}</b></span></div>
+    <div class="c2 dim">{T("k_cost_est")}</div>
   </div>
 </div>"""
 
-    charts = charts_html(recs, days, graph_n, procs, tdays, projs) + network_block(recs, graph_n)
+    charts = charts_html(recs, days, graph_n, procs, tdays, projs, scope) + network_block(recs, graph_n)
 
     live = ""
     if running:
@@ -1167,7 +1385,7 @@ def render_pixel(recs, refresh, lang="zh", days=14, rows=20, graph_n=12, procs=N
   <div class="panel-h"><i class="sq"></i><h2 class="px">{T("p_now")}</h2>
     <div class="right"><span class='tag live px' title='已运行 {dur_text(r)}'>ELAPSED {dur_lcd(r)}</span>
     <span class="tag px">{human_tok(r.get('tokens')).upper()} TOK</span>
-    <span class="tag px">{cost_text(r)}</span></div></div>
+    <span class="tag px" title="{e(cost_tip(r))}">{cost_text(r)}</span></div></div>
   <div class="live">
     <p class="task">{e(clean_title(r.get('label')))}</p>
     <div class="meta"><span>{e(r.get('project'))}</span><b>·</b><span class="led"><i></i>{T("st_run")}</span><b>·</b>
@@ -1190,7 +1408,7 @@ def render_pixel(recs, refresh, lang="zh", days=14, rows=20, graph_n=12, procs=N
   <td><span class="pill {cls}">{e(label)}</span></td>
   <td class="num"><div class="tokcell"><span class="toknum">{human_tok(r.get('tokens')).upper()}</span>
       <span class="seg">{seg_bar(pct)}</span></div></td>
-  <td class="num money">{cost_text(r)}</td>
+  <td class="num money" title="{e(cost_tip(r))}">{cost_text(r)}</td>
   <td class="num t">{dur_lcd(r)}</td>
 </tr>""")
 
@@ -1200,7 +1418,7 @@ def render_pixel(recs, refresh, lang="zh", days=14, rows=20, graph_n=12, procs=N
     <div class="right">{_ctl_grp("rows", [(20, "20"), (50, "50"), (100, "100")], row_limit)}<span class="tag px">{T("records", len(recs))}</span></div></div>
   <table>
     <colgroup><col style="width:104px"><col style="width:76px"><col style="width:146px"><col><col style="width:92px"><col style="width:150px"><col style="width:84px"><col style="width:82px"></colgroup>
-    <thead><tr><th>{T("th_time")}</th><th>{T("th_worker")}</th><th>{T("th_project")}</th><th>{T("th_task")}</th><th>{T("th_state")}</th><th>{T("th_tokens")}</th><th>{T("th_cost")}</th><th>{T("th_dur")}</th></tr></thead>
+    <thead><tr><th>{T("th_time")}</th><th>{T("th_worker")}</th><th>{T("th_project")}</th><th>{T("th_task")}</th><th>{T("th_state")}</th><th>{T("th_tokens")}</th><th>{T("th_cost")}</th><th title="{T('dur_tip')}">{T("th_dur")}</th></tr></thead>
     <tbody>{''.join(rows) if rows else f'<tr><td colspan="8" class="empty">{T("empty_records")}</td></tr>'}</tbody>
   </table>
 </div>
@@ -1209,7 +1427,7 @@ def render_pixel(recs, refresh, lang="zh", days=14, rows=20, graph_n=12, procs=N
   <span class="px">SRC: ~/.dsh/sessions · ~/.pi/agent/sessions · ~/.hermes/logs/pi-rpc-*.jsonl</span>
   <span class="px">{T("foot_detail")}</span>
 </div>
-</div>{NET_JS}</body></html>"""
+</div>{NET_JS}{SWAP_JS}</body></html>"""
     return head + top + charts + live + table
 
 
@@ -1268,10 +1486,11 @@ def demo_recs(lang="zh"):
                     (start + 180, "edit", f"{proj}/src/{'exporter' if proj == 'my-app' else 'handlers'}.py"),
                     (start + 300, "bash", "cargo test --release -q"),
                 ]
-            if worker == "DSH":
-                rec["cost_cny"] = round(tin / 1e6 + tout * 4e-6 + tcache * 0.02e-6, 4)
-            else:
-                rec["cost_usd"] = round(tin / 1e6 * 0.14 + tout * 4e-6, 4)
+            span = (end or time.time()) - start
+            rec["cost_cny"] = W.cost_cny_of(tin, tout, tcache, start)
+            rec["cost_usd"] = round(rec["cost_cny"] / FX, 5)
+            rec["segs"] = ([[start, start + span * 0.45], [start + span * 0.72, end or time.time()]]
+                           if span > 1200 else [[start, end or time.time()]])
             out.append(rec)
             seq += 1
     # 补几条 Hermes / 子 agent / Codex，让演示里六种执行者都出现
@@ -1290,6 +1509,8 @@ def demo_recs(lang="zh"):
             "worker": worker, "kind": kind, "key": f"demo-{kind}-{idx}", "path": "",
             "state": "done", "tokens": tin + tout + tc, "tok_in": tin, "tok_out": tout, "tok_cache": tc,
             "cost_usd": round(tin * 0.14e-6 + tout * 4e-6 + tc * 0.014e-6, 5),
+            "cost_cny": W.cost_cny_of(tin, tout, tc, st),
+            "segs": [[st, st + dur]],
             "title": label, "task": label, "label": label, "project": proj,
             "start": st, "end": st + dur, "turns": 6, "steps": 0, "tools": {}, "tool_calls": [],
             "last_text": "", "created": st, "last": st + dur, "last_start": st + dur,
@@ -1311,14 +1532,26 @@ def demo_procs(lang="zh"):
 
 
 def serve(port, style, refresh, demo, lang="zh", days=14, rows=20, graph_n=12,
-          tdays=7, projs=6):
+          tdays=7, projs=6, scope="all"):
     """小 HTTP 服务：每次请求重新采集并渲染；页面自带 meta refresh 自动刷新。
 
-    查询参数：?lang=zh|en &days=7|14|30 &rows=20|50|100 &graph=6|12|24
+    查询参数：?lang=zh|en &days=7|14|30 &rows=20|50|100 &graph=6|12|24 &scope=all|dg
     """
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from urllib.parse import urlparse, parse_qs
     memo = {}
+    recs_memo = {"t": 0.0, "recs": None}
+
+    def get_recs(lang_):
+        """采集结果短时复用：切范围时只重渲染（~30ms），不再重解全部会话（~1.3s）。"""
+        if demo:
+            return demo_recs(lang_)
+        now = time.time()
+        if recs_memo["recs"] is not None and now - recs_memo["t"] < 4.0:
+            return recs_memo["recs"]
+        recs = W.collect()
+        recs_memo.update({"t": time.time(), "recs": recs})
+        return recs
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -1338,20 +1571,22 @@ def serve(port, style, refresh, demo, lang="zh", days=14, rows=20, graph_n=12,
             want_graph = int(pick("graph", [6, 12, 24], graph_n))
             want_tdays = int(pick("tdays", [7, 14, 30], tdays))
             want_projs = int(pick("projs", [4, 6, 10], projs))
+            want_scope = pick("scope", ["all", "dg"], scope)
             want_style = "clean" if "style=clean" in self.path else style
-            key = (want_style, want_lang, want_days, want_rows, want_graph, want_tdays, want_projs)
+            key = (want_style, want_lang, want_days, want_rows, want_graph, want_tdays, want_projs,
+                   want_scope)
             ent = memo.get(key)
             if not ent or time.time() - ent[0] > 2:
-                recs = demo_recs(want_lang) if demo else W.collect()
+                recs = get_recs(want_lang)
                 procs = demo_procs(want_lang) if demo else W.scan_processes()
                 cur = {"lang": want_lang, "days": want_days, "rows": want_rows, "graph": want_graph,
-                       "tdays": want_tdays, "projs": want_projs}
+                       "tdays": want_tdays, "projs": want_projs, "scope": want_scope}
                 if want_style == "clean":
                     doc = render(recs, refresh)
                 else:
                     doc = render_pixel(recs, refresh, lang=want_lang, days=want_days,
                                        rows=want_rows, graph_n=want_graph, procs=procs, cur=cur,
-                                       tdays=want_tdays, projs=want_projs)
+                                       tdays=want_tdays, projs=want_projs, scope=want_scope)
                 ent = (time.time(), doc.encode("utf-8"))
                 memo[key] = ent
             body = ent[1]
@@ -1390,12 +1625,14 @@ def main():
     ap.add_argument("--graph", type=int, choices=[6, 12, 24], default=12, help="拓扑里显示多少个任务")
     ap.add_argument("--tdays", type=int, choices=[7, 14, 30], default=7, help="时间线天数")
     ap.add_argument("--projs", type=int, choices=[4, 6, 10], default=6, help="项目图显示几个")
+    ap.add_argument("--scope", choices=["all", "dg"], default="all",
+                    help="时间线范围：all=含 Hermes 主循环，dg=只看派出去的任务")
     args = ap.parse_args()
 
     if args.serve:
         return serve(args.serve, args.style, 0 if args.no_refresh else args.refresh, args.demo,
                      lang=args.lang, days=args.days, rows=args.rows, graph_n=args.graph,
-                     tdays=args.tdays, projs=args.projs)
+                     tdays=args.tdays, projs=args.projs, scope=args.scope)
 
     recs = demo_recs(args.lang) if args.demo else W.collect()
     refresh = 0 if args.no_refresh else args.refresh
@@ -1403,8 +1640,10 @@ def main():
         procs = demo_procs(args.lang) if args.demo else W.scan_processes()
         doc = render_pixel(recs, refresh, lang=args.lang, days=args.days, rows=args.rows,
                            graph_n=args.graph, procs=procs, tdays=args.tdays, projs=args.projs,
+                           scope=args.scope,
                            cur={"lang": args.lang, "days": args.days, "rows": args.rows,
-                                "graph": args.graph, "tdays": args.tdays, "projs": args.projs})
+                                "graph": args.graph, "tdays": args.tdays, "projs": args.projs,
+                                "scope": args.scope})
         out = args.out or PIXEL_CACHE
     else:
         doc = render(recs, refresh)

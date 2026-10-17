@@ -315,7 +315,7 @@ def _parse_pi_session(path):
     rec = {
         "worker": "Pi",
         "path": path,
-        "key": os.path.basename(path).split("_")[-1].replace(".jsonl", "")[:8],
+        "key": re.sub(r"[^0-9a-z]", "", os.path.splitext(os.path.basename(path))[0].split("_")[-1])[-8:],
         "state": "?",
         "tokens": 0,
         "tok_in": 0,
@@ -370,6 +370,9 @@ def _parse_pi_session(path):
                     rec["cost_usd"] += cost
                     if (msg.get("stopReason") or "") == "stop":
                         rec["ended"] = True
+                        rec.pop("error", None)
+                    elif (msg.get("stopReason") or "") == "error":
+                        rec["error"] = str(msg.get("errorMessage") or "error")
                     content = msg.get("content") or []
                     txt = []
                     for c in content if isinstance(content, list) else []:
@@ -399,21 +402,127 @@ def _parse_pi_session(path):
     return rec
 
 
-def scan_pi_sessions():
+def scan_pi_sessions(procs=None):
+    procs = live_pi_procs() if procs is None else procs
     out = []
     for path in glob.glob(os.path.join(PI_SESSIONS, "*", "*.jsonl")):
         rec = _parse_cached(path, lambda path=path: _parse_pi_session(path))
         if rec is not None:
-            out.append(rec)
+            out.append(_finish_pi_session(rec, procs))
     return out
 
 
+def _pid_alive(pid):
+    """进程是否还活着。os.kill(pid, 0) 不发信号只做存在性检查。"""
+    try:
+        return os.kill(int(pid), 0) is None
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def _etime_sec(s):
+    """ps 的 etime（[[D-]HH:]MM:SS）→ 秒。"""
+    s = (s or "").strip()
+    days = 0
+    if "-" in s:
+        d, s = s.split("-", 1)
+        try:
+            days = int(d)
+        except ValueError:
+            days = 0
+    try:
+        parts = [int(x) for x in s.split(":")]
+    except ValueError:
+        return 0
+    while len(parts) < 3:
+        parts.insert(0, 0)
+    h, m, sec = parts[-3:]
+    return days * 86400 + h * 3600 + m * 60 + sec
+
+
+def live_pi_procs():
+    """当前活着的 Pi 进程（一次性 + 常驻 RPC 都在内）。
+
+    pi 的 cmdline 在 ps 里就是一个词 `pi`（npm 全局 bin 直接 exec），
+    所以必须按\"整词\"匹配——以前只认 `pi -p ...`，结果一个都扫不到。
+    """
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,pcpu=,etime=,command="],
+                             capture_output=True, text=True, timeout=6).stdout
+    except Exception:
+        return []
+    now = time.time()
+    rows = []
+    for line in out.splitlines():
+        parts = line.strip().split(None, 3)
+        if len(parts) < 4:
+            continue
+        pid, cpu, etime, cmd = parts
+        head = cmd.strip()
+        if not re.match(r"^(\S*/)?pi(\s|$)", head):
+            continue
+        rows.append({"pid": int(pid), "cpu": cpu,
+                     "start": now - _etime_sec(etime), "cwd": _pid_cwd(pid)})
+    return rows
+
+
+def _rpc_meta(name):
+    path = os.path.join(HOME, ".hermes", "state", "pi-rpc", name, "meta.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _finish_pi_session(rec, procs=None):
+    """一次性 Pi 会话的存活判定。
+
+    会话文件里没有\"进程还活着\"的字段：ended 只在最后一条 assistant 消息
+    stopReason=stop 时出现，所以以前任何运行中的会话都被读成\"中断\"。
+    现在用真实 pi 进程（cwd + 启动时刻最近）对齐，配 mtime 兜底。
+    """
+    procs = live_pi_procs() if procs is None else procs
+    cands = [p for p in procs if p.get("cwd") and p["cwd"] == rec.get("cwd")]
+    best = min(cands, key=lambda p: abs(p["start"] - rec["start"])) if cands else None
+    fresh = (time.time() - rec["last"]) < 90
+    # 有 pi 进程在跑却不在这个 cwd → 这次会话肯定没在跑（ps 失败时才退回 mtime 判定）
+    running_now = best or (not procs and fresh)
+    if (not rec.get("ended")) and (not rec.get("error")) and running_now:
+        rec["state"] = "RUNNING"
+        rec["end"] = None
+        if best:
+            rec["pid"] = best["pid"]
+    else:
+        if rec.get("ended"):
+            rec["state"] = "done"
+        elif rec.get("error"):
+            rec["state"] = "FAILED"
+        else:
+            rec["state"] = "interrupted"
+        rec["end"] = rec["last"]
+    return _extend_running(rec)
+
+
 def _finish_pi_rpc(rec, settled, name, path):
-    """存活判定依赖当前时间，缓存命中的记录每次都要重算。"""
-    alive = os.path.exists(path) and (time.time() - rec["last"] < 90)
-    rec["state"] = "RUNNING" if alive else ("done" if settled else "interrupted")
+    """存活判定依赖当前时间与进程状态，缓存命中的记录每次都要重算。"""
+    meta = _rpc_meta(name)
+    alive = any(_pid_alive(meta.get(k)) for k in ("pid", "holder_pid") if meta.get(k))
+    # 一轮在飞 = 最近一次 agent_start 之后还没有 agent_settled
+    busy = (rec.get("last_start") or 0) > (rec.get("settled_ts") or 0)
+    if alive and busy:
+        rec["state"] = "RUNNING"
+        rec["end"] = None
+    elif rec.get("turn_error"):
+        rec["state"] = "FAILED"       # 上一轮是 401/超时这类错误，别报成"完成"
+        rec["end"] = rec.get("ts_last") or rec["last"]
+    else:
+        rec["state"] = "done" if settled else "interrupted"
+        rec["end"] = rec.get("ts_last") or rec["last"]
+    if meta.get("pid"):
+        rec["pid"] = meta["pid"]
     rec["project"] = f"pi-rpc:{name}"[:20]
-    rec["end"] = None if rec["state"] == "RUNNING" else (rec.get("ts_last") or rec["last"])
+    rec["label"] = _one_line(rec.get("task") or "", 100) or name
     rec.pop("ts_last", None)
     rec["cost_cny"] = cost_cny_of(rec["tok_in"], rec["tok_out"], rec["tok_cache"], rec["start"])
     return _extend_running(rec)
@@ -463,6 +572,10 @@ def _parse_pi_rpc(path, name):
                 ts = _ms(e.get("timestamp")) or rec["last"]
                 if t == "turn_end" and role == "assistant":
                     tok, cost = _pi_usage_totals(msg)
+                    if (msg.get("stopReason") or "") == "error":
+                        rec["turn_error"] = str(msg.get("errorMessage") or "error")
+                    else:
+                        rec.pop("turn_error", None)
                     rec["tokens"] += tok
                     rec["tok_in"] += int((msg.get("usage") or {}).get("input") or 0)
                     rec["tok_out"] += int((msg.get("usage") or {}).get("output") or 0)
@@ -479,8 +592,8 @@ def _parse_pi_rpc(path, name):
                     txt = content if isinstance(content, str) else " ".join(
                         c.get("text", "") for c in content or [] if isinstance(c, dict)
                     )
-                    if txt.strip():
-                        rec["task"] = txt
+                    if txt.strip() and not rec["task"]:
+                        rec["task"] = txt      # 只记第一次派活，后续 steer 不覆盖标题
             elif t == "tool_execution_start":
                 ts = _ms(e.get("timestamp")) or rec["last"]
                 nm = e.get("toolName") or e.get("name") or "?"
@@ -488,6 +601,7 @@ def _parse_pi_rpc(path, name):
                 rec["tool_calls"].append((ts, nm, _one_line(json.dumps(e.get("args") or e.get("input")), 140)))
             elif t == "agent_settled":
                 rec["settled"] += 1
+                rec["settled_ts"] = _ms(e.get("timestamp")) or rec["last"]
             elif t == "agent_start":
                 rec["last_start"] = _ms(e.get("timestamp")) or rec["last"]
     except OSError:
@@ -523,6 +637,9 @@ def scan_processes():
                              capture_output=True, text=True, timeout=6).stdout
     except Exception:
         return []
+    pi_live = live_pi_procs()
+    pi_start = {p["pid"]: p["start"] for p in pi_live}
+    rpc_names = _pi_rpc_names_by_pid()
     rows = []
     for line in out.splitlines():
         parts = line.strip().split(None, 3)
@@ -533,14 +650,18 @@ def scan_processes():
             continue
         if cmd.startswith("sh -c "):      # pnpm/sh 包装层，真正的 node 进程另有一行
             continue
-        agent = None
+        agent, task = None, ""
         if "bin.ts headless" in cmd:
             agent = "DSH"
             m = re.search(r"bin\.ts headless\s+(.+)$", cmd)
             task = (m.group(1).strip() if m else "")[:60]
         elif "pi_rpc.py" in cmd:
-            agent, task = "Pi·rpc", ""
-        elif re.search(r"(^|/)pi\b.*\s-p\s", cmd) or "bundle/cli.js" in cmd:
+            continue      # 客户端脚本（发一条就走），真正在跑的是它拉起的 pi
+        elif re.match(r"^(\S*/)?pi(\s|$)", cmd.strip()):
+            # pi 在 ps 里的 cmdline 就是一个词，不分 RPC/一次性就只能靠 meta 的 pid 认
+            agent = "Pi·rpc" if int(pid) in rpc_names else "Pi"
+            task = rpc_names.get(int(pid), "")
+        elif "bundle/cli.js" in cmd:
             agent, task = "Pi", ""
         elif "codex" in cmd and "app-server" not in cmd and "happy" not in cmd:
             agent, task = "Codex", ""
@@ -549,11 +670,47 @@ def scan_processes():
         if not agent:
             continue
         cwd = _pid_cwd(pid)
+        if agent == "Pi" and not task:
+            task = _pi_task_near(cwd, pi_start.get(int(pid)))
         rows.append({"pid": int(pid), "agent": agent, "cwd": cwd,
                      "project": os.path.basename(cwd.rstrip("/")) if cwd else "?",
                      "elapsed": etime, "cpu": cpu, "task": task})
     rows.sort(key=lambda r: -float(r["cpu"] or 0))
     return rows
+
+
+def _pi_rpc_names_by_pid():
+    """pid → 常驻会话名（meta.json 里登记了 pi 和 fifo holder 两个 pid）。"""
+    m = {}
+    for path in glob.glob(os.path.join(HOME, ".hermes", "state", "pi-rpc", "*", "meta.json")):
+        name = os.path.basename(os.path.dirname(path))
+        try:
+            with open(path, encoding="utf-8") as fh:
+                d = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            continue
+        for k in ("pid", "holder_pid"):
+            if d.get(k):
+                m[int(d[k])] = name
+    return m
+
+
+def _pi_task_near(cwd, start):
+    """一次性 pi 进程 → 它在跑的会话（同 cwd、启动时刻最近），取任务首行。"""
+    if not cwd:
+        return ""
+    slug = "--" + cwd.strip("/").replace("/", "-") + "--"
+    best, bestd = None, 1e18
+    for path in glob.glob(os.path.join(PI_SESSIONS, slug, "*.jsonl")):
+        rec = _parse_cached(path, lambda path=path: _parse_pi_session(path))
+        if not rec or not rec.get("start"):
+            continue
+        d = abs(rec["start"] - (start or 0))
+        if d < bestd:
+            best, bestd = rec, d
+    if best and bestd < 600:
+        return _one_line(best.get("task") or best.get("label") or "", 60)
+    return ""
 
 
 def hermes_pid():

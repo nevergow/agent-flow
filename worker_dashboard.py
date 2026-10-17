@@ -512,10 +512,23 @@ PIX_DSH = "#5A4B8C"
 PIX_PI = "#0E7C86"
 PIX_RPC = "#B5820E"
 PIX_OK = "#2C8C57"
+PIX_RUN = "#1F6FB2"
 PIX_HALT = "#A9710A"
 PIX_BAD = "#C7413B"
 PIX_GRID = "#D9D2BF"
 PIX_AXIS = "#5E6057"
+
+
+def _state_color(st):
+    """状态 → 颜色。RUNNING 必须有自己的颜色：以前落到 PIX_BAD，
+    在跑的任务和失败的任务一个颜色，看图就分不出来。"""
+    if st == "done":
+        return PIX_OK
+    if st == "RUNNING":
+        return PIX_RUN
+    if st in ("interrupted", "aborted", "cancelled"):
+        return PIX_HALT
+    return PIX_BAD
 
 
 def _t(x, y, txt, size=7.0, fill=PIX_AXIS, anchor="start"):
@@ -786,15 +799,16 @@ def chart_durations(recs, w=520, h=200, n=16):
             out.append(_t(cx - slot / 2 + 3, pt + 8, f"{st:%m/%d}", 6.5, PIX_AXIS))
         prev_day = st.date()
         bh = ph * v / maxv
-        col = PIX_OK if r["state"] == "done" else (PIX_HALT if r["state"] in ("interrupted", "aborted") else PIX_BAD)
+        col = _state_color(r["state"])
         tip = f"{clean_title(r.get('label'))[:36]} · {r['worker']} · {r['key']} · {r['state']} · {_dur_label(v)}"
         out.append(f'<rect x="{cx - bw / 2:.1f}" y="{pt + ph - bh:.1f}" width="{bw:.1f}" height="{bh:.1f}" fill="{col}">{_tip(tip)}</rect>')
         if (i % 2 == 0 and i != len(items) - 2) or i == len(items) - 1:
             out.append(_t(cx, h - 16, f"{st:%H:%M}", 6.5, PIX_AXIS, "middle"))
     legend = ('<span><i style="background:%s"></i>完成</span>'
+              '<span><i style="background:%s"></i>' + T("st_run") + '</span>'
               '<span><i style="background:%s"></i>中断</span>'
               '<span><i style="background:%s"></i>失败</span>'
-              '<span>x=开始时间（虚线=换日）</span>') % (PIX_OK, PIX_HALT, PIX_BAD)
+              '<span>x=开始时间（虚线=换日）</span>') % (PIX_OK, PIX_RUN, PIX_HALT, PIX_BAD)
     svg = f'<svg viewBox="0 0 {w} {h}">{"".join(out)}</svg>'
     return _panel(T("p_duration"), f"LAST {len(items)}", svg, legend)
 
@@ -941,7 +955,7 @@ def chart_network(recs, w=1040, h=560, n=12):
     # task
     for i, r in enumerate(items):
         y = ty[i]
-        st_col = PIX_OK if r["state"] == "done" else (PIX_HALT if r["state"] in ("interrupted", "aborted") else PIX_BAD)
+        st_col = _state_color(r["state"])
         label = _label_of(r)
         short = label if len(label) <= 26 else label[:25] + "…"
         tipx = f"{label} · {r['worker']} · {r['state']} · {human_tok(r.get('tokens'))} tok · {dur_text(r)} · {r['key']}"
@@ -971,8 +985,10 @@ def chart_network(recs, w=1040, h=560, n=12):
               '<span><i style="background:%s"></i>Pi</span>'
               '<span><i style="background:%s"></i>Pi·rpc</span>'
               '<span><i style="background:%s"></i>DONE</span>'
+              '<span><i style="background:%s"></i>' + T("st_run") + '</span>'
               '<span><i style="background:%s"></i>HALT</span>'
-              '<span>竖线=同一项目汇聚 · 左→右=委派方向 · 悬停节点只看它的连接</span>') % (PIX_DSH, PIX_PI, PIX_RPC, PIX_OK, PIX_HALT)
+              '<span>竖线=同一项目汇聚 · 左→右=委派方向 · 悬停节点只看它的连接</span>') % (
+                  PIX_DSH, PIX_PI, PIX_RPC, PIX_OK, PIX_RUN, PIX_HALT)
     svg = f'<svg class="net" viewBox="0 0 {w} {h}">{"".join(out)}</svg>'
     return _panel(T("p_graph"), T("h_graph", len(items)), svg, legend,
                   _ctl_grp("graph", [(6, "6"), (12, "12"), (24, "24")], n))
@@ -1260,25 +1276,29 @@ def _ctl_grp(key, pairs, current):
 
 
 def processes_panel(procs, recs):
+    """PROCESSES 只列真实 OS 进程。
+
+    PID 只能来自 ps / pi-rpc 的 meta.json —— 绝不能拿会话冒充进程：
+    旧版给每条 RUNNING 会话挂同一个 hermes_pid()，于是两行同一个 PID（还是别的
+    profile 的网关），同时把真正在跑的常驻 pi 进程漏掉。
+    """
     rows = []
-    by_proj = {}
-    for r in recs:
-        if r.get("state") == "RUNNING":
-            by_proj.setdefault(r.get("project"), r)
-    have = {(pr["agent"], pr["project"]) for pr in procs}
+    by_pid = {r.get("pid"): r for r in recs if r.get("pid")}
+    have = {pr.get("pid") for pr in procs}
     for r in recs:
         if r.get("state") != "RUNNING":
             continue
-        w = r.get("worker")
-        if w in ("DSH", "Pi", "Pi·rpc", "Codex") and any(a == w for a, _ in have):
+        pid = r.get("pid")
+        if not pid or pid in have:
             continue
-        pid = r.get("pid") or (W.hermes_pid() if w == "Hermes" else None) or "—"
-        procs = procs + [{"pid": pid, "agent": w, "cwd": "",
+        procs = procs + [{"pid": pid, "agent": r.get("worker"), "cwd": "",
                           "project": r.get("project") or "?", "elapsed": dur_lcd(r),
                           "cpu": "—", "task": clean_title(r.get("label"))}]
+        have.add(pid)
     for pr in procs[:8]:
-        rec = by_proj.get(pr["project"])
-        task = (clean_title(rec.get("label")) if rec else (pr.get("task") or "—"))
+        rec = by_pid.get(pr.get("pid"))
+        # 进程自己的任务文本（ps/meta 给的）优先，其次才用会话标题
+        task = clean_title(pr.get("task")) or (clean_title(rec.get("label")) if rec else "") or "—"
         badge = {"DSH": "b-dsh", "Pi": "b-pi", "Pi·rpc": "b-rpc", "Codex": "b-rpc"}.get(pr["agent"], "b-pi")
         rows.append(
             f'<tr><td class="num t">{pr["pid"]}</td>'
@@ -1373,26 +1393,32 @@ def render_pixel(recs, refresh, lang="zh", days=14, rows=20, graph_n=12, procs=N
 
     live = ""
     if running:
-        r = running[0]
-        calls = (r.get("tool_calls") or [])[-7:]
-        tl = "".join(
-            f"<li><time>{datetime.fromtimestamp(ts, TZ):%H:%M:%S}</time>"
-            f"<span class='tool'>{e(name.upper())}</span><span class='arg' title='{e(arg[:400])}'>{e(arg[:160])}</span></li>"
-            for ts, name, arg in calls
-        ) or "<li><span class='arg'>还没有工具调用（在读上下文/思考）</span></li>"
-        live = f"""
+        # 按最后活动时间排，不是按“谁先开始”：多个执行者同时在跑时，每一条都要能看到
+        running = sorted(running, key=lambda r: r.get("last") or 0, reverse=True)
+        cards = []
+        for idx, r in enumerate(running[:4]):
+            calls = (r.get("tool_calls") or [])[-7:]
+            tl = "".join(
+                f"<li><time>{datetime.fromtimestamp(ts, TZ):%H:%M:%S}</time>"
+                f"<span class='tool'>{e(name.upper())}</span><span class='arg' title='{e(arg[:400])}'>{e(arg[:160])}</span></li>"
+                for ts, name, arg in calls
+            ) or f"<li><span class='arg'>{T('no_tools')}</span></li>"
+            nth = (f' <span class="tag px">{idx + 1}/{len(running)}</span>'
+                   if len(running) > 1 else "")
+            cards.append(f"""
 <div class="panel">
-  <div class="panel-h"><i class="sq"></i><h2 class="px">{T("p_now")}</h2>
+  <div class="panel-h"><i class="sq"></i><h2 class="px">{T("p_now")}</h2>{nth}
     <div class="right"><span class='tag live px' title='已运行 {dur_text(r)}'>ELAPSED {dur_lcd(r)}</span>
     <span class="tag px">{human_tok(r.get('tokens')).upper()} TOK</span>
     <span class="tag px" title="{e(cost_tip(r))}">{cost_text(r)}</span></div></div>
   <div class="live">
     <p class="task">{e(clean_title(r.get('label')))}</p>
     <div class="meta"><span>{e(r.get('project'))}</span><b>·</b><span class="led"><i></i>{T("st_run")}</span><b>·</b>
-      <span class="id">SESSION {e(r['key'])}</span></div>
+      <span class="id">{e(r.get('worker', ''))} {e(r['key'])}</span></div>
     <ul class="timeline">{tl}</ul>
   </div>
-</div>"""
+</div>""")
+        live = "".join(cards)
 
     rows = []
     for r in recs[:row_limit]:

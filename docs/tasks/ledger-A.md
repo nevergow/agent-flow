@@ -96,28 +96,45 @@ af_ledger.py selftest
   ```
 - `stats --json` 结构（字段名逐字，看板直接用）：
   ```json
-  {"since":"7d","slices_total":5,"passed_first_try":3,"passed_after_retry":1,
-   "rejected":1,"open":0,"aborted":0,"pass_rate_first_try":0.6,
-   "avg_attempts":1.4,
+  {"since":"7d","slices_total":5,"verdict_slices":4,"passed_first_try":3,"passed_after_retry":1,
+   "rejected":1,"open":0,"aborted":0,"pass_rate_first_try":0.75,
+   "avg_attempts":1.4,"cron_runs":8,"cron_success_rate":1.0,
    "by_executor":{"dsh":{"total":3,"passed":2,"rejected":1},
                   "pi":{"total":2,"passed":2,"rejected":0}},
    "avg_minutes":12.5}
   ```
-  口径写在代码注释里：`pass_rate_first_try = passed_first_try / slices_total`（分母是窗口内全部切片，
-  包含未结案的 `open`，这比只除以已结案更保守）；`avg_attempts` 只统计有 verdict 的切片；
-  `avg_minutes` 取每个切片所有 run 的 `(end-start)` 之和的平均，没有 run 的切片不计。
+  口径（写进代码注释，且必须与 `list` 的可见明细一致）：
+  - `verdict_slices` = 有实质裁决（`result in ('pass','reject','abort')`）的切片数，`na` 不算；
+  - `pass_rate_first_try = passed_first_try / verdict_slices`（分母 0 时给 `0.0`）；
+    **cron 切片是 `na` 裁决，绝不能进这个分母**，否则自动同步的 cron 会把通过率稀释成无意义数字；
+  - `avg_attempts` 的分母同样只统计 `verdict_slices`；
+  - `slices_total` 仍是窗口内全部切片（含 cron、含未结案）；
+  - `cron_runs` = 窗口内 `kind='cron'` 的 run 数；`cron_success_rate` = `executor='cron'` 且
+    `state='passed'` 的切片数 / `executor='cron'` 的切片数（无 cron 切片时 0.0）；
+  - `avg_minutes` 取每个切片所有 run 的 `(end-start)` 之和的平均，没有 run 的切片不计。
 - 文本模式（不带 `--json`）：`list`/`stats` 打印对齐的纯文本表格，适合终端看；不要 ANSI 颜色。
 
 ## 6. sync-cron 契约
 
 - 只读打开 `~/.hermes/state.db`（`file:...?mode=ro`，uri=True）。
-- 取 `select id, source, display_name, started_at, ended_at, end_reason from sessions
+- 取 `select id, source, display_name, title, started_at, ended_at, end_reason from sessions
   where source='cron' and started_at >= ?`（窗口 `--days`，默认 7）。
-- 按 `display_name`（空则 `'cron'`）聚成一个切片：`executor='cron'`，`state` 由最近一次 run 的
-  `end_reason` 推：`completed`→`passed`，`error|failed`→`failed`，其余→`running`（ended_at 为空）/`aborted`。
-- 每个 cron 会话写一条 `runs`（kind='cron'，start/end 用会话时间，exit_code 留 NULL），
-  `verdict` 写一条 `result='na'`（不参与通过率）。切片 id 用 `slc_cron_<display_name 的 16 位 hash>`，
-  重复同步必须幂等（同一 display_name 不新建切片、不重复插 run：用稳定的 run id `run_cron_<session_id>` 去重）。
+- **job 名**：`display_name` 非空则用；否则取 `title` 里第一个 `" · "` 之前的部分；都没有则 `'cron'`。
+- **job id**：从 `id` 用 `^cron_([0-9a-f]{6,})_` 捕获；捕获不到就用 job 名的 sha1。
+- **一个 job 一个切片**：`id = "slc_cron_" + sha1(job_id)[:16]`，`goal = job 名`，`executor='cron'`。
+- **一个 job 一条需求**：`id = "req_cron_" + sha1(job_id)[:10]`，`source='cron'`，`text=job 名`，
+  `ts` = 该 job 最早会话的 `started_at`；切片的 `req_id` 指向它（`需求 → 切片` 视图不能有孤儿）。
+- **状态映射**（取该 job 最近一次会话的 `end_reason`，全部小写后判断）：
+  - 以 `cron_complete` 开头 → `passed`
+  - 以 `cron_fail` / `cron_error` / `error` / `failed` 开头 → `failed`
+  - 以 `cron_abort` / `interrupt` / `abort` / `cancel` 开头 → `aborted`
+  - `cron_timeout` 开头 → `failed`
+  - `ended_at is NULL` → `running`
+  - 其它未知值 → `failed`，并把原 `end_reason` 写进该切片 `verdicts.reason`（不要丢信息）
+- 每个 cron 会话写一条 `runs`：`id="run_cron_<session_id>"`、`kind='cron'`、`evidence='cron'`
+  （**不是 registry**）、start/end 用会话时间、`exit_code` 留 NULL。
+- 每个切片一条 `verdict`：`result='na'`、`reason` 记最近一次 `end_reason`。
+- 幂等：重复同步不新建切片/需求/run；已存在的 run 若上次没 end、这次有，只补 `end`。
 - Hermes DB 打不开时：打印警告，退出码 0（不要炸）。
 
 ## 7. 模块级读接口（给看板用）
@@ -151,7 +168,12 @@ def db_path() -> str                           # 生效的库路径（尊重 AF_
    ```
 4. `python3 af_ledger.py seed-demo` 在 `AF_LEDGER` 未设置时 → 退出码 2 且不写库（贴输出）。
 5. `AF_LEDGER=/tmp/afA_verify.db python3 af_ledger.py seed-demo` → exit 0，`list --json` 里 3 条切片。
-6. `python3 af_ledger.py sync-cron --days 2 --json` → exit 0（只读本机 Hermes 库），贴出 count。
+6. `AF_LEDGER=/tmp/afA_cron.db python3 af_ledger.py sync-cron --days 2 --json` → exit 0，连跑两次；
+   第二次 `new_runs` 必须为 0；随后用 python 断言（贴输出）：
+   - `slices` 数量 ≥ 1，且没有 `goal='cron'` 的切片（除非真的取不到 title）
+   - 每个 `executor='cron'` 切片的 `req_id` **非空**
+   - `select distinct evidence from runs` 只有 `('cron',)`
+   - `select distinct state from slices where executor='cron'` 只有 `('passed',)`（本机 cron 全是 cron_complete）
 7. `git status --porcelain` → **只有** `?? af_ledger.py`（外加 /tmp 里的东西不算）。
 
 ## 9. Stop Conditions
@@ -176,3 +198,32 @@ def db_path() -> str                           # 生效的库路径（尊重 AF_
    [ARTIFACTS]: <无则 none>
    [NOTE]: <做了什么、跳过了什么、为什么>
    ```
+
+---
+
+## 11. Retry Context — Attempt 2
+
+上次（Attempt 1）的代码主体通过，但 cron 建模有 5 处缺陷，**根因是我的任务书写错，不是实现失误**。
+以下为可复现证据与精确位置：
+
+```
+[Evidence] 本机真数据：
+  select id, display_name, title, end_reason from sessions where source='cron' limit 2
+  → id='cron_73388cbfa312_20261018_000008', display_name=NULL,
+    title='fx-usd-cny-monitor · Oct 18 00:01', end_reason='cron_complete'
+[Observed] AF_LEDGER=/tmp/afcron.db python3 af_ledger.py sync-cron --days 2 --json
+  → {"count": 1, "slices": 1, "sessions": 8, "new_runs": 8}
+    select goal,state from slices → [('cron', 'aborted')]      ← 全机 cron 聚成一条 + 状态判错
+    select distinct evidence from runs → [('registry',)]        ← 语义错
+    select req_id from slices → [None]                          ← 需求树孤儿
+[File:Line]
+  af_ledger.py:656  name = (r["display_name"] or "").strip() or "cron"     ← 用 display_name 聚合（实为 NULL）
+  af_ledger.py:619-628 _cron_state(...) 不认 'cron_complete'               ← 落到 else 分支 → aborted
+  af_ledger.py:698  evidence 硬写 'registry'
+  af_ledger.py:680  插入切片时 req_id 固定 NULL
+  af_ledger.py:451-521 _stats_payload 的 pass_rate 分母含 cron(na) 切片
+[New requirement] 见本文件 §5（stats 新增 verdict_slices / cron_runs / cron_success_rate，
+  pass_rate 分母改为 verdict_slices）与 §6（job 名/ID 解析、状态映射、evidence='cron'、每个 job 一条需求）。
+[Scope] 仍然只允许改 af_ledger.py；旧库不用做迁移（验收时我会删掉旧 ledger.db 重新 sync）。
+[Anti-cheat] 不许为了通过验收把 cron_complete 特判成 passed 却把其它 reason 全归为 passed；
+  §11 的映射表必须逐条实现，我会用伪造的 end_reason 造 4 条会话逐条验证。

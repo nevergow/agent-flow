@@ -1051,6 +1051,57 @@ def backfill(days=7):
 
 # ------------------------------------------------------------------- 演示数据
 
+def demo_history(days=7):
+    """`--demo` 的历史：虚构项目、固定种子，7 天流水（供截图/试用，不读本机数据）。"""
+    import random
+    rnd = random.Random(20261017)
+    now = now_ts()
+    day0 = datetime.fromtimestamp(now).replace(hour=0, minute=0, second=0, microsecond=0)
+    base = day0.timestamp()
+    projs = ["my-app", "api-service", "docs-site"]
+    tasks = {
+        "my-app": ["Step 3 任务书（导出器合并）", "修复 CI 里的 flaky 测试", "给解码器补边界用例",
+                   "把日志换成结构化输出", "profile 一下慢路径"],
+        "api-service": ["加 /v1/batch 接口", "补限流中间件", "写迁移脚本", "排查 502 的根因"],
+        "docs-site": ["README 翻成英文", "补 quickstart 截图", "改导航结构"],
+    }
+    kinds = [("dsh", "dsh"), ("dsh", "dsh"), ("dsh", "dsh"), ("pi-rpc", "pi-rpc"),
+             ("pi", "pi"), ("codex", "codex"), ("subagent", "subagent")]
+    out = {}
+    seq = 0
+    for d in range(days - 1, -1, -1):
+        day_start = base - d * 86400
+        n = 2 if d == 0 else rnd.randint(3, 5)
+        for i in range(n):
+            kind, kindkey = rnd.choice(kinds)
+            proj = rnd.choice(projs)
+            label = rnd.choice(tasks[proj])
+            # 越近的任务越靠后；今天留 2 条在跑/待验收
+            hour = 9 + (i * 2) % 9
+            start = day_start + hour * 3600 + rnd.randint(0, 1800)
+            dur = rnd.choice([120, 300, 480, 900, 1500, 2400])
+            if d == 0 and i >= n - 2:
+                start = now - (n - i) * 600
+                state = "active" if i == n - 1 else "waiting"
+                dur = int(now - start)
+            else:
+                state = "done"
+            tin = rnd.randint(8, 140) * 1000
+            tcache = rnd.randint(20, 900) * 10000
+            tout = rnd.randint(3, 40) * 1000
+            tok = tin + tcache + tout
+            cost = cost_cny(start, tin, tout, tcache)
+            key = f"{kindkey}-{d}{i}{seq}"
+            seq += 1
+            out[key] = {
+                "key": key, "kind": kindkey, "label": label, "full": label, "project": proj,
+                "start": start, "end": 0 if state != "done" else start + dur, "state": state,
+                "tokens": tok, "cost": cost, "stage": rnd.choice(["侦察", "实现", "自检", "收尾"]),
+                "in": tin, "out": tout, "cache": tcache, "demo": True,
+            }
+    return {"tasks": out}
+
+
 def demo_state(window_min=15):
     """`--demo`：不读任何本机数据，返回一份固定场景（所有数字都从同一份任务表推）。"""
     now = now_ts()
@@ -1194,7 +1245,14 @@ class Handler(BaseHTTPRequestHandler):
                                               ensure_ascii=False).encode())
         if self.path.startswith("/api/history"):
             if self.demo:
-                return self._send(200, b'{"tasks":[]}')
+                q = re.search(r"hours=(\d+)", self.path)
+                hrs = int(q.group(1)) if q else 24
+                cut = now_ts() - hrs * 3600
+                rows = [{k: r.get(k) for k in ("key", "kind", "label", "project", "start", "end", "state",
+                                               "tokens", "cost", "stage", "in", "out", "cache")}
+                        for r in demo_history()["tasks"].values() if (r.get("start") or 0) >= cut]
+                rows.sort(key=lambda r: r["start"] or 0)
+                return self._send(200, json.dumps({"tasks": rows}, ensure_ascii=False).encode())
             q = re.search(r"hours=(\d+)", self.path)
             hrs = int(q.group(1)) if q else 24
             cut = now_ts() - hrs * 3600

@@ -407,11 +407,13 @@ function renderProjects(){
   $('ch-proj').innerHTML = s;
 }
 function renderDurations(){
-  const rows = hist.slice().sort((a,b)=>(b.start||0)-(a.start||0)).slice(0,10);
-  const W=460, H=150, maxD = Math.max(60, ...rows.map(r=>((r.end||r.start+1)-(r.start||0))));
+  const rows = hist.slice().sort((a,b)=>(b.start||0)-(a.start||0)).slice(0,12);
+  const nowS = Date.now()/1000;
+  const dur = r => Math.max(1, (r.end || (r.state === 'done' ? (r.start||0)+1 : nowS)) - (r.start||0));
+  const W=460, H=150, maxD = Math.max(60, ...rows.map(dur));
   let s = '';
   rows.forEach((r,i) => {
-    const y = 10 + i*13.5, d = Math.max(1,(r.end||r.start+1)-(r.start||0));
+    const y = 10 + i*11.4, d = dur(r);
     const w = Math.max(2,(d/maxD)*(W-280));
     const col = r.state === 'active' ? '#A9710A' : r.state === 'waiting' ? '#C7413B' : '#2C8C57';
     s += `<text x="0" y="${y+8}" class="glabel">${esc((BADGE[r.kind]?BADGE[r.kind][1]:r.kind))} ${esc((r.project||'').slice(0,12))}</text>`;

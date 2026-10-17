@@ -6,10 +6,27 @@
 > which stage each task is in, and what it cost.**
 
 A local, zero-dependency dashboard that reads coding-agent session logs
-(Hermes / DSH headless / Pi / Pi RPC / Codex / sub-agents) and renders them as
-one live topology.
+(Hermes / DSH headless / Pi / Pi RPC / Codex / sub-agents) and renders them as a
+paper-and-pixels operations board: a live delegation graph plus the full run
+ledger with tokens, cost and duration per task.
 
 ![screenshot](docs/screenshot.png)
+
+## What's on the board
+
+- **4 stat cards** — running now / today's dispatches / today's token throughput / today's cost
+- **DELEGATION GRAPH** — vertical lanes (`INGRESS → ORCHESTRATOR → WORKERS → WORKSPACE`),
+  one edge per dispatch, arrowheads one-way; line weight follows the step's cost
+- **TOKENS / 7D** — stacked cache / input / output bars per day with a cost line
+- **RUNS / 7D** — dispatches per day, stacked by executor
+- **PROJECTS** — tokens and run count per workspace
+- **DURATION** — last 10 runs as bars, coloured by outcome
+- **RUN HISTORY** — every run: time, worker, project, task, state, tokens (with a
+  12-segment magnitude bar), cost, duration
+
+The look is deliberately retro: paper background, 2px ink borders, hard offset
+shadows, and the Press Start 2P pixel font embedded in the HTML (no network
+requests, works offline).
 
 ## Why
 
@@ -23,9 +40,9 @@ edges" graph:
 - **Nodes** — participants: you → orchestrator → workers (sandboxed long-chain /
   one-shot / persistent / sub-agent) → workspace
 - **Edges** — one dispatch each, strictly directed; the same pair of nodes can
-  have many edges (one per step), automatically fanned out so they stay distinct
-- Only **running** edges animate (particles along the path); a new dispatch
-  sends a pulse into the target. Nothing moves unless it means something.
+  have many edges (one per step), drawn as separate lanes
+- **Live** — running steps are solid green, awaiting-acceptance dashed red, and
+  finished ones faint grey; the whole board refreshes every 5 seconds
 - A Gantt strip of recent dispatches plus a 24-hour replay scrubber sit at the
   bottom.
 
@@ -53,18 +70,17 @@ python3 agent_flow.py --port 9000 --window 30
 | `--history [hours]` | print a task table with cost to stdout |
 | `--dump` | print one live snapshot as JSON (debugging the collector) |
 
-Page option: `?static=1` disables animation (screenshots / low power).
+Page option: `?static=1` disables the live refresh (handy for screenshots).
 
 ## How to read the graph
 
-- **Columns**: `INGRESS → ORCHESTRATOR → WORKERS → WORKSPACE`. Workers with no
-  active or waiting task collapse into the **IDLE pool** on the right, so the
-  main view stays readable.
-- **Cards**: name / status pill (`RUN` running, `WAIT` finished and awaiting
-  review, `IDLE` free) / current stage / session count / tokens in the last
-  5 minutes / cost in window / a thin load bar.
-- **Edges**: one dispatch each, fanned out when a pair has several; arrowheads
-  are one-way.
+- **Columns**: `INGRESS → ORCHESTRATOR → WORKERS → WORKSPACE`. Every executor
+  gets a box; idle ones show `IDLE` instead of a session count
+- **Boxes**: name / `n 会话 · stage · tokens · cost` (in the window)
+- **Edges**: one dispatch each, L-shaped, arrowheads one-way; active steps are
+  solid, awaiting-acceptance dashed red, finished ones faint
+- **Table rows**: `RUN` / `WAIT` / `DONE` pills follow the same colour code as
+  the graph — red means "finished, waiting for your review"
 - **Stage** is inferred from tool names in the last 3 minutes: `侦察` (read-only),
   `实现` (writes), `自检` (test commands), `收尾`.
 - **Click** a node or an edge for details, including ready-to-paste commands

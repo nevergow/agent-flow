@@ -383,7 +383,8 @@ def scan_pi(window_s, max_age_s=3 * 3600):
 def read_codex(path):
     """解析 codex rollout：cwd / 任务 / 每次 token_count 的增量事件（含累计成本）。"""
     now = now_ts()
-    rec = {"cwd": "", "task": "", "start": 0.0, "end": 0.0, "events": [], "last_text": ""}
+    rec = {"cwd": "", "task": "", "start": 0.0, "end": 0.0, "events": [], "last_text": "",
+           "in": 0, "out": 0, "cache": 0}
     prev = None
     cum_cost = 0.0
     try:
@@ -430,6 +431,9 @@ def read_codex(path):
                     uncached = max(0, delta["input_tokens"] - delta["cached_input_tokens"])
                     d_cost = cost_cny(ts or now, uncached, delta["output_tokens"], delta["cached_input_tokens"])
                     cum_cost += d_cost
+                    rec["in"] += delta["input_tokens"]
+                    rec["out"] += delta["output_tokens"]
+                    rec["cache"] += delta["cached_input_tokens"]
                     rec["events"].append((ts or now, cur["total_tokens"], cum_cost, delta["total_tokens"], d_cost))
                     rec["end"] = max(rec["end"], ts or now)
     if not rec["start"]:
@@ -599,6 +603,7 @@ def upsert_history(h, tasks, now):
             "start": r.get("start") or t.get("start") or t["last_event"],
             "end": None if state == "active" else t["last_event"],
             "state": state, "tokens": t["tokens"], "cost": round(t.get("cost") or 0, 6),
+            "in": t.get("in") or 0, "out": t.get("out") or 0, "cache": t.get("cache") or 0,
             "stage": t["stage"], "log": t["path"], "parent": t.get("parent", "hermes"),
             "evidence": t.get("evidence", "inferred"),
         })
@@ -833,7 +838,7 @@ def backfill(days=7):
     h = load_history()
     added = 0
 
-    def put(kind, key, meta, buckets, start, end, state):
+    def put(kind, key, meta, buckets, start, end, state, split=None):
         nonlocal added
         if not buckets or not start:
             return
@@ -846,7 +851,9 @@ def backfill(days=7):
                             "active" if ts < (end or now) - 60 else state])
         rec = {"key": key, "kind": kind, "samples": samples, "start": start, "end": end,
                "state": state, "tokens": cum_t, "cost": cum_c, "stage": samples[-1][3],
-               "first_seen": start, "backfilled": True}
+               "first_seen": start, "backfilled": True,
+               "in": (split or {}).get("in", 0), "out": (split or {}).get("out", 0),
+               "cache": (split or {}).get("cache", 0)}
         rec.update(meta)
         h["tasks"][f"{kind}:{key}"] = rec
         added += 1
@@ -866,6 +873,7 @@ def backfill(days=7):
         meta = {"label": "", "full": "", "project": "", "log": path,
                 "parent": "hermes", "evidence": "inferred"}
         buckets, start, end, state = {}, 0.0, 0.0, "done"
+        split = {"in": 0, "out": 0, "cache": 0}
         for e in iter_zstd(path):
             t = e.get("type"); d = e.get("data") or {}
             ts = ms_of(e.get("time")) or 0
@@ -888,6 +896,9 @@ def backfill(days=7):
                 cell[0] += int(u.get("totalTokens") or 0)
                 cell[1] += cost_cny(ts, int(u.get("inputTokens") or 0),
                                     int(u.get("outputTokens") or 0), int(u.get("cacheReadTokens") or 0))
+                split["in"] += int(u.get("inputTokens") or 0)
+                split["out"] += int(u.get("outputTokens") or 0)
+                split["cache"] += int(u.get("cacheReadTokens") or 0)
                 end = max(end, ts)
             elif t == "tool/call":
                 b = int(ts // 60 * 60)
@@ -896,7 +907,7 @@ def backfill(days=7):
                 if d.get("reason"):
                     state = {"completed": "done", "aborted": "aborted"}.get(
                         (d.get("reason") or {}).get("kind"), "done")
-        put("dsh", key, meta, buckets, start, end, state)
+        put("dsh", key, meta, buckets, start, end, state, split)
 
     # Pi RPC
     for path in glob.glob(os.path.join(PI_RPC, "pi-rpc-*.jsonl")):
@@ -907,6 +918,7 @@ def backfill(days=7):
             continue
         name = re.sub(r"^pi-rpc-|\.jsonl$", "", os.path.basename(path))
         buckets, start, end, state = {}, 0.0, 0.0, "done"
+        split = {"in": 0, "out": 0, "cache": 0}
         meta = {"label": name, "full": "", "project": "pi-rpc", "log": path,
                 "parent": "hermes", "evidence": "inferred"}
         try:
@@ -923,11 +935,14 @@ def backfill(days=7):
                     cell[0] += int(u.get("totalTokens") or 0)
                     cell[1] += cost_cny(ts, int(u.get("input") or 0), int(u.get("output") or 0),
                                         int(u.get("cacheRead") or 0))
+                    split["in"] += int(u.get("input") or 0)
+                    split["out"] += int(u.get("output") or 0)
+                    split["cache"] += int(u.get("cacheRead") or 0)
                     start = start or ts
                     end = max(end, ts)
         except OSError:
             continue
-        put("pi-rpc", name, meta, buckets, start, end, state)
+        put("pi-rpc", name, meta, buckets, start, end, state, split)
 
     # Pi 一次性
     for path in glob.glob(os.path.join(PI_SESSIONS, "*", "*.jsonl")):
@@ -938,6 +953,7 @@ def backfill(days=7):
             continue
         key = os.path.basename(path).split("_")[-1][:8]
         buckets, start, end, state = {}, 0.0, 0.0, "done"
+        split = {"in": 0, "out": 0, "cache": 0}
         meta = {"label": "", "full": "", "project": "", "log": path,
                 "parent": "hermes", "evidence": "inferred"}
         try:
@@ -965,10 +981,13 @@ def backfill(days=7):
                         cell[0] += int(u.get("totalTokens") or 0)
                         cell[1] += cost_cny(ts, int(u.get("input") or 0), int(u.get("output") or 0),
                                             int(u.get("cacheRead") or 0))
+                        split["in"] += int(u.get("input") or 0)
+                        split["out"] += int(u.get("output") or 0)
+                        split["cache"] += int(u.get("cacheRead") or 0)
                         end = max(end, ts)
         except OSError:
             continue
-        put("pi", key, meta, buckets, start, end, state)
+        put("pi", key, meta, buckets, start, end, state, split)
 
     # Codex（rollout 里的 token_count 是累计值，按增量入桶）
     for path in glob.glob(os.path.join(CODEX_SESSIONS, "**", "*.jsonl"), recursive=True):
@@ -989,7 +1008,8 @@ def backfill(days=7):
         meta = {"label": one_line(r["task"], 200) or "codex", "full": r["task"],
                 "project": os.path.basename(r["cwd"]) or "?", "log": path,
                 "parent": "hermes", "evidence": "inferred"}
-        put("codex", key, meta, buckets, r["start"], r["end"], "done")
+        put("codex", key, meta, buckets, r["start"], r["end"], "done",
+            {"in": r["in"], "out": r["out"], "cache": r["cache"]})
 
     # 子 agent（数据库里只有起止，没有 token/成本）
     try:
@@ -1179,7 +1199,8 @@ class Handler(BaseHTTPRequestHandler):
             hrs = int(q.group(1)) if q else 24
             cut = now_ts() - hrs * 3600
             h = get_history()
-            rows = [{k: r.get(k) for k in ("key", "kind", "label", "project", "start", "end", "state", "tokens", "cost", "stage")}
+            rows = [{k: r.get(k) for k in ("key", "kind", "label", "project", "start", "end", "state",
+                                           "tokens", "cost", "stage", "in", "out", "cache")}
                     for r in h["tasks"].values() if (r.get("start") or 0) >= cut]
             rows.sort(key=lambda r: r["start"] or 0)
             return self._send(200, json.dumps({"tasks": rows}, ensure_ascii=False).encode())

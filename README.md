@@ -33,6 +33,18 @@ range, projects how many to show (4 / 6 / 10), the graph how many runs to draw
 (中文 / EN) sits under the clock. Everything is encoded in the URL, so a view is
 shareable: `?days=30&tdays=14&projs=4&graph=24&rows=100&lang=en&scope=all`.
 
+### Slices (from the ledger)
+
+The `SLICES` panel sits between the delegation graph and `NOW RUNNING`. It reads
+the read-only SQLite ledger written by `af_ledger.py`
+(`~/.hermes/state/agent_flow/ledger.db`, override with `AF_LEDGER`): slices are
+grouped by request with state, executor, attempt, last verdict, runs and update
+time, and the header switches a 7 / 14 / 30-day window. Record one with:
+
+```bash
+python3 af_ledger.py new-slice --req <ID> --goal "…" --executor pi
+```
+
 Switching a control swaps the DOM in place instead of navigating: hovering a chip
 prefetches that variant (~0.1 s), so the click lands immediately and the scroll
 position is kept. The server reuses one collection for 4 s and caches per-file

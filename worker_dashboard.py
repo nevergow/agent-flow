@@ -22,6 +22,10 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import worker_runs as W  # noqa: E402
+try:
+    import af_ledger as L  # noqa: E402
+except Exception:
+    L = None                 # 数据层不可用时由 slices_panel 降级为空状态
 
 TZ = timezone(timedelta(hours=8))
 CACHE = os.path.join(os.path.expanduser("~"), ".hermes", "cache", "worker-dashboard.html")
@@ -57,7 +61,6 @@ def human_tok(n):
 
 
 FX = 7.1          # 美元→人民币，只用于兼容旧记录里只有 $ 的情况
-PRICE_NOTE = "deepseek-flash 官价：缓存 ¥0.02 / 输入 ¥1 / 输出 ¥4 每百万 token，北京工作日 9-12、14-18 双倍"
 
 
 def rec_cny(r):
@@ -78,11 +81,12 @@ def cost_tip(r):
     """悬停说明这行钱是怎么来的：谁、多少 token、按什么价。"""
     v = rec_cny(r)
     usd = r.get("cost_usd") or 0
-    parts = [f"{r.get('worker')} · {cost_text(r)}（估算）",
-             f"缓存 {r.get('tok_cache') or 0:,} / 输入 {r.get('tok_in') or 0:,} / 输出 {r.get('tok_out') or 0:,} tokens"]
+    parts = [f"{r.get('worker')} · {cost_text(r)} {T('cost_est')}",
+             T("cost_tokens", f"{r.get('tok_cache') or 0:,}",
+               f"{r.get('tok_in') or 0:,}", f"{r.get('tok_out') or 0:,}")]
     if r.get("worker") != "DSH" and usd:
-        parts.append(f"上游自报 ${usd:.4f}")
-    parts.append(PRICE_NOTE)
+        parts.append(T("cost_upstream", usd))
+    parts.append(T("price_note"))
     return " · ".join(parts)
 
 
@@ -209,6 +213,7 @@ code.k{font:11.5px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--ink-3
 
 
 def render(recs, refresh):
+    LANG["v"] = "zh"          # clean 视图固定中文；避免复用进程时沿用上一次的 en
     now = datetime.now(TZ)
     today = now.date()
     running = [r for r in recs if r["state"] == "RUNNING"]
@@ -447,6 +452,7 @@ tbody tr:hover{background:#FBF7EA}
 .b-hermes{color:#F2EEE3;background:#23242A}
 .b-sub{color:#B0472F;background:#F7E4DE}
 .b-codex{color:#157A5B;background:#DFF0E9}
+.b-cron{background:var(--amber-soft);color:var(--amber)}
 .pill{font-family:'PS2P',monospace;font-size:8px;padding:5px 7px 4px;border:1.5px solid currentColor;display:inline-block;white-space:nowrap}
 .p-run{color:var(--green);background:var(--green-soft)}
 .p-ok{color:var(--ink-2);background:#F1EEE4}
@@ -467,6 +473,10 @@ tbody tr:hover{background:#FBF7EA}
 .legend i{width:9px;height:9px;display:inline-block;border:1px solid rgba(20,21,25,.5)}
 .foot{display:flex;justify-content:space-between;gap:16px;margin-top:16px;color:var(--ink-3);font-size:10.5px;flex-wrap:wrap}
 .empty{padding:26px 18px;color:var(--ink-3);font-size:12.5px}
+table.slices .num,table.slices .t{font-variant-numeric:tabular-nums}
+table.slices tr.req td{background:#F8F4E7;font-weight:640;color:var(--ink-2);border-bottom:1.5px solid var(--hair)}
+table.slices tfoot td{padding:9px 13px;color:var(--ink-3);font-size:10.5px;
+  border-top:1.5px dashed var(--hair);font-variant-numeric:tabular-nums}
 @media (max-width:860px){.grid2{grid-template-columns:1fr}.stats{grid-template-columns:repeat(2,1fr)}body{padding:22px 14px 30px}
   h1{font-size:23px}.top{flex-direction:column}.clock{width:100%}.timeline li{grid-template-columns:54px 76px minmax(0,1fr)}}
 """
@@ -708,7 +718,7 @@ def chart_gantt(recs, days=7, scope="all", w=520):
             t_b = (mid + timedelta(seconds=s1)).strftime("%H:%M")
             tip = (f"{d:%m/%d} {t_a}→{t_b} · {r['worker']} · {state_label(r['state'])}"
                    f" · {clean_title(r.get('label'))[:46]}"
-                   f" · 活跃 {dur_text(r)}（{len(r.get('segs') or []) or 1} 段） · {cost_text(r)}")
+                   f" · {T('active_tip', dur_text(r), len(r.get('segs') or []) or 1)} · {cost_text(r)}")
             out.append(f'<rect x="{bx:.1f}" y="{by:.1f}" width="{bw:.1f}" height="{lane_h}" '
                        f'fill="{col}" fill-opacity="{op}" stroke="#141519" stroke-width="0.35" '
                        f'stroke-opacity="0.45">{_tip(tip)}</rect>')
@@ -765,7 +775,7 @@ def chart_projects(recs, w=520, h=200, top=6):
         out.append(_t(pl, y - 5, name[:20], 7.5, "#33342E"))
         out.append(_t(w - pr + 6, y + bh / 2 + 2.5, f"{_tok(tok)}·{n}·{share:.0f}%", 6.5, PIX_AXIS))
     if not items:
-        out.append(_t(pl, pt + 14, "NO DATA", 8, PIX_AXIS))
+        out.append(_t(pl, pt + 14, T("no_data"), 8, PIX_AXIS))
     svg = f'<svg viewBox="0 0 {w} {h}">{"".join(out)}</svg>'
     return _panel(T("p_projects"), T("h_projects"), svg, "",
                   _ctl_grp("projs", [(4, "4"), (6, "6"), (10, "10")], top))
@@ -804,11 +814,11 @@ def chart_durations(recs, w=520, h=200, n=16):
         out.append(f'<rect x="{cx - bw / 2:.1f}" y="{pt + ph - bh:.1f}" width="{bw:.1f}" height="{bh:.1f}" fill="{col}">{_tip(tip)}</rect>')
         if (i % 2 == 0 and i != len(items) - 2) or i == len(items) - 1:
             out.append(_t(cx, h - 16, f"{st:%H:%M}", 6.5, PIX_AXIS, "middle"))
-    legend = ('<span><i style="background:%s"></i>完成</span>'
-              '<span><i style="background:%s"></i>' + T("st_run") + '</span>'
-              '<span><i style="background:%s"></i>中断</span>'
-              '<span><i style="background:%s"></i>失败</span>'
-              '<span>x=开始时间（虚线=换日）</span>') % (PIX_OK, PIX_RUN, PIX_HALT, PIX_BAD)
+    legend = (f'<span><i style="background:{PIX_OK}"></i>{T("lg_done")}</span>'
+              f'<span><i style="background:{PIX_RUN}"></i>{T("st_run")}</span>'
+              f'<span><i style="background:{PIX_HALT}"></i>{T("lg_halt")}</span>'
+              f'<span><i style="background:{PIX_BAD}"></i>{T("lg_fail")}</span>'
+              f'<span>{T("dur_x")}</span>')
     svg = f'<svg viewBox="0 0 {w} {h}">{"".join(out)}</svg>'
     return _panel(T("p_duration"), f"LAST {len(items)}", svg, legend)
 
@@ -934,7 +944,7 @@ def chart_network(recs, w=1040, h=560, n=12):
     out.append(f'<g class="gn" data-nid="hermes">'
                f'<rect x="{hub["x"]}" y="{hub["y"]}" width="{hub["w"]}" height="{hub["h"]}" fill="#141519"/>'
                f'{_t(hub["x"] + hub["w"] / 2, hub["y"] + 19, "HERMES", 9, "#F2EEE3", "middle")}'
-               f'{_t(hub["x"] + hub["w"] / 2, hub["y"] - 8, "ORCHESTRATOR", 6.5, PIX_AXIS, "middle")}'
+               f'{_t(hub["x"] + hub["w"] / 2, hub["y"] - 8, T("orch"), 6.5, PIX_AXIS, "middle")}'
                f'{_t(hub["x"] + hub["w"] / 2, hub["y"] + hub["h"] + 14, T("runs_tag", len(items)), 6.5, PIX_AXIS, "middle")}'
                f'</g>')
 
@@ -981,14 +991,13 @@ def chart_network(recs, w=1040, h=560, n=12):
                    f'{_t(px + pw_ - 6, y + 18, f"x{cnt}", 6.5, PIX_AXIS, "end")}'
                    f'</g>')
 
-    legend = ('<span><i style="background:%s"></i>DSH</span>'
-              '<span><i style="background:%s"></i>Pi</span>'
-              '<span><i style="background:%s"></i>Pi·rpc</span>'
-              '<span><i style="background:%s"></i>DONE</span>'
-              '<span><i style="background:%s"></i>' + T("st_run") + '</span>'
-              '<span><i style="background:%s"></i>HALT</span>'
-              '<span>竖线=同一项目汇聚 · 左→右=委派方向 · 悬停节点只看它的连接</span>') % (
-                  PIX_DSH, PIX_PI, PIX_RPC, PIX_OK, PIX_RUN, PIX_HALT)
+    legend = (f'<span><i style="background:{PIX_DSH}"></i>DSH</span>'
+              f'<span><i style="background:{PIX_PI}"></i>Pi</span>'
+              f'<span><i style="background:{PIX_RPC}"></i>Pi·rpc</span>'
+              f'<span><i style="background:{PIX_OK}"></i>{T("lg_done")}</span>'
+              f'<span><i style="background:{PIX_RUN}"></i>{T("st_run")}</span>'
+              f'<span><i style="background:{PIX_HALT}"></i>{T("lg_halt")}</span>'
+              f'<span>{T("bus")} · {T("bus_hover")}</span>')
     svg = f'<svg class="net" viewBox="0 0 {w} {h}">{"".join(out)}</svg>'
     return _panel(T("p_graph"), T("h_graph", len(items)), svg, legend,
                   _ctl_grp("graph", [(6, "6"), (12, "12"), (24, "24")], n))
@@ -997,11 +1006,111 @@ def network_block(recs, graph_n=12):
     return f'<div class="grid1">{chart_network(recs, n=graph_n)}</div>'
 
 
-def charts_html(recs, days=14, graph_n=12, procs=None, tdays=7, projs=6, scope="all"):
+SLICE_PILL = {"passed": "p-ok", "rejected": "p-warn", "running": "p-run",
+              "failed": "p-bad", "aborted": "p-bad", "planned": "p-ok"}
+SLICE_STATE_KEY = {"planned": "sl_planned", "running": "sl_running",
+                   "passed": "sl_passed", "rejected": "sl_rejected",
+                   "failed": "sl_failed", "aborted": "sl_aborted"}
+SLICE_VERDICT_KEY = {"pass": "vd_pass", "reject": "vd_reject",
+                     "abort": "vd_abort", "na": "vd_na"}
+# 账本里的 executor 是小写；复用主看板的 badge 配色。
+SLICE_WORKER = {"dsh": "DSH", "pi": "Pi", "rpc": "Pi·rpc",
+                "subagent": "Hermes·sub", "codex": "Codex"}
+
+
+def _slice_pill(state):
+    return SLICE_PILL.get(state, "p-warn"), T(SLICE_STATE_KEY.get(state, "sl_failed"))
+
+
+def _slice_verdict(v):
+    if not v:
+        return "—"
+    return T(SLICE_VERDICT_KEY.get(v, "vd_na"))
+
+
+def _slices_tag(total, verdict, pass_pct, avg):
+    return T("slices_tag", total, verdict, pass_pct, avg) if verdict else T("slices_tag_none", total)
+
+
+def _slices_empty_html(sdays):
+    return f"""
+<div class="panel">
+  <div class="panel-h"><i class="sq" style="background:var(--amber);animation:none"></i>
+    <h2 class="px">{T("p_slices")}</h2>
+    <div class="right">{_ctl_grp("sdays", [(7, "7D"), (14, "14D"), (30, "30D")], sdays)}<span class="tag px">{_slices_tag(0, 0, 0, 0.0)}</span></div></div>
+  <table class="slices">
+    <colgroup><col style="width:84px"><col><col style="width:96px"><col style="width:56px"><col style="width:64px"><col style="width:56px"><col style="width:96px"></colgroup>
+    <thead><tr><th>{T("th_state")}</th><th>{T("th_slice")}</th><th>{T("th_worker")}</th><th class="num">{T("th_attempt")}</th><th>{T("th_verdict")}</th><th class="num">{T("th_runs")}</th><th>{T("th_updated")}</th></tr></thead>
+    <tbody><tr><td colspan="7" class="empty">{T("slices_empty")}</td></tr></tbody>
+    <tfoot><tr><td colspan="7">{T("slices_show", 0, 0)}</td></tr></tfoot>
+  </table>
+</div>"""
+
+
+def slices_panel(sdays=7):
+    """SLICES 面板：只读 af_ledger；缺库/异常时降级为空状态，绝不拖垮整页。"""
+    try:
+        if L is None:
+            return _slices_empty_html(sdays)
+        data = L.read_slices(days=sdays, limit=50)
+        stats = L.read_stats(days=sdays)
+        slices = data.get("slices") or []
+        groups, index = [], {}
+        for sl in slices:
+            rid = sl.get("req_id") or ""
+            if rid not in index:
+                index[rid] = []
+                groups.append((rid, index[rid]))
+            index[rid].append(sl)
+
+        body = []
+        for rid, items in groups:
+            req_text = (items[0].get("req_text") or "").strip() or rid
+            body.append(f'<tr class="req"><td colspan="7">{e(req_text[:60])}</td></tr>')
+            for sl in sorted(items, key=lambda x: x.get("created") or 0):
+                ex = (sl.get("executor") or "").lower()
+                pcls, plabel = _slice_pill(sl.get("state"))
+                bcls = "b-cron" if ex in ("cron", "inline") else worker_badge(SLICE_WORKER.get(ex, ex))
+                updated = datetime.fromtimestamp(float(sl.get("updated") or 0), TZ)
+                body.append(
+                    f'<tr class="sl">'
+                    f'<td><span class="pill {pcls}">{e(plabel)}</span></td>'
+                    f'<td><span class="taskcell" title="{e(sl.get("goal"))}">{e(sl.get("goal"))}</span></td>'
+                    f'<td><span class="badge {bcls}">{e(ex.upper())}</span></td>'
+                    f'<td class="num">{int(sl.get("attempt") or 0)}</td>'
+                    f'<td>{e(_slice_verdict(sl.get("last_verdict")))}</td>'
+                    f'<td class="num">{int(sl.get("runs") or 0)}</td>'
+                    f'<td class="t">{updated:%m-%d %H:%M}</td>'
+                    f'</tr>')
+
+        body_html = "\n".join(body) or f'<tr><td colspan="7" class="empty">{T("slices_empty")}</td></tr>'
+        total = int(stats.get("slices_total") or 0)
+        verdict = int(stats.get("verdict_slices") or 0)
+        pass_pct = round(float(stats.get("pass_rate_first_try") or 0) * 100)
+        avg = float(stats.get("avg_attempts") or 0)
+        shown = len(slices)
+        return f"""
+<div class="panel">
+  <div class="panel-h"><i class="sq" style="background:var(--amber);animation:none"></i>
+    <h2 class="px">{T("p_slices")}</h2>
+    <div class="right">{_ctl_grp("sdays", [(7, "7D"), (14, "14D"), (30, "30D")], sdays)}<span class="tag px">{_slices_tag(total, verdict, pass_pct, avg)}</span></div></div>
+  <table class="slices">
+    <colgroup><col style="width:84px"><col><col style="width:96px"><col style="width:56px"><col style="width:64px"><col style="width:56px"><col style="width:96px"></colgroup>
+    <thead><tr><th>{T("th_state")}</th><th>{T("th_slice")}</th><th>{T("th_worker")}</th><th class="num">{T("th_attempt")}</th><th>{T("th_verdict")}</th><th class="num">{T("th_runs")}</th><th>{T("th_updated")}</th></tr></thead>
+    <tbody>{body_html}</tbody>
+    <tfoot><tr><td colspan="7">{T("slices_show", shown, total)}</td></tr></tfoot>
+  </table>
+</div>"""
+    except Exception:
+        return _slices_empty_html(sdays)
+
+
+def charts_html(recs, days=14, graph_n=12, procs=None, tdays=7, projs=6, scope="all", sdays=7):
     last = chart_durations(recs) if procs is None else processes_panel(procs, recs)
     grid = (chart_daily(recs, days=days) + chart_gantt(recs, days=tdays, scope=scope) +
             chart_projects(recs, top=projs) + last)
-    return f'<div class="grid2">{grid}</div>'
+    return (f'<div class="grid2">{grid}</div>' + network_block(recs, graph_n) +
+            slices_panel(sdays))
 
 
 
@@ -1020,6 +1129,13 @@ I18N = {
         "th_cpu": "CPU", "th_task": "任务",
         "range": "范围", "rows": "行数", "graph": "拓扑", "lang": "语言",
         "cost_axis": "花费（右轴 ¥）", "dim_halt": "淡色=中断", "total": "合计",
+        "price_note": "deepseek-flash 官价：缓存 ¥0.02 / 输入 ¥1 / 输出 ¥4 每百万 token，北京工作日 9-12、14-18 双倍",
+        "cost_est": "（估算）", "cost_tokens": "缓存 %s / 输入 %s / 输出 %s tokens",
+        "cost_upstream": "上游自报 $%.4f",
+        "cost_today_tip": "今日 0:00 起 · 估算合计 ¥%.2f（%s）· Pi 组含 Pi/Pi·rpc/Codex，Hermes 组含主循环与子 agent · %s · 只是按 token 单价推算，不是账单实付",
+        "active_tip": "活跃 %s（%d 段）", "lg_done": "完成", "lg_halt": "中断", "lg_fail": "失败",
+        "dur_x": "x=开始时间（虚线=换日）", "bus_hover": "悬停节点只看它的连接",
+        "elapsed": "已运行", "lang_zh": "中文", "lang_en": "EN",
         "k_cost_est": "官价估算·非实付", "sc_all": "全部", "sc_dg": "只看派活",
         "tl_lanes": "%d 条会话 · 最多 %d 道", "tl_segs": "%d 段", "p_now_runs": "%d 条在窗内",
         "bus": "竖线=同一项目汇聚 · 左→右=委派方向",
@@ -1030,6 +1146,16 @@ I18N = {
         "p_projects": "项目", "h_projects": "TOKEN·次数·占比",
         "p_duration": "耗时", "p_graph": "派活拓扑", "h_graph": "最近 %d 次",
         "p_proc": "进程", "p_now": "正在运行", "p_hist": "运行流水",
+        "p_slices": "切片",
+        "slices_tag": "%d 切片 · %d 已裁决 · 一次通过 %d%% · 平均 %.1f 次",
+        "slices_tag_none": "%d 切片 · 暂无裁决（cron 同步不计入）",
+        "slices_empty": "还没有切片记录 · 用 af_ledger.py 记一条",
+        "slices_show": "显示 %d / 共 %d 条（窗口内）",
+        "sl_planned": "计划中", "sl_running": "在跑", "sl_passed": "通过",
+        "sl_rejected": "打回", "sl_failed": "失败", "sl_aborted": "中止",
+        "th_slice": "切片", "th_attempt": "尝试", "th_verdict": "裁决",
+        "th_runs": "RUNS", "th_updated": "更新",
+        "vd_pass": "通过", "vd_reject": "打回", "vd_abort": "中止", "vd_na": "—",
         "th_time": "时间", "th_worker": "执行者", "th_project": "项目", "th_task": "任务",
         "th_state": "状态", "th_tokens": "TOKEN", "th_cost": "花费", "th_dur": "耗时",
         "dur_tip": "活跃时长：按事件流分段的实际活动时间，空闲超过 20 分钟断开（会话被隔天恢复时不会算成一整段）",
@@ -1054,6 +1180,13 @@ I18N = {
         "th_cpu": "CPU", "th_task": "TASK",
         "range": "RANGE", "rows": "ROWS", "graph": "GRAPH", "lang": "LANG",
         "cost_axis": "cost (right axis ¥)", "dim_halt": "dim = interrupted", "total": "total",
+        "price_note": "deepseek-flash list price: cache ¥0.02 / input ¥1 / output ¥4 per M tokens, doubled on Beijing weekdays 9-12 & 14-18",
+        "cost_est": "(est.)", "cost_tokens": "cache %s / input %s / output %s tokens",
+        "cost_upstream": "upstream $%.4f",
+        "cost_today_tip": "since 00:00 · est. total ¥%.2f (%s) · Pi group = Pi/Pi·rpc/Codex, Hermes group = main loop + sub-agents · %s · derived from token prices, not an invoice",
+        "active_tip": "active %s (%d seg)", "lg_done": "DONE", "lg_halt": "HALT", "lg_fail": "FAIL",
+        "dur_x": "x = start time (dashed = new day)", "bus_hover": "hover a node to keep only its links",
+        "elapsed": "ELAPSED", "lang_zh": "ZH", "lang_en": "EN",
         "k_cost_est": "est. · not billed", "sc_all": "ALL", "sc_dg": "DELEGATED",
         "tl_lanes": "%d sessions · up to %d lanes", "tl_segs": "%d seg", "p_now_runs": "%d in view",
         "bus": "bar = project bus · left→right = dispatch",
@@ -1064,6 +1197,16 @@ I18N = {
         "p_projects": "PROJECTS", "h_projects": "TOKENS·RUNS·SHARE",
         "p_duration": "DURATION", "p_graph": "DELEGATION GRAPH", "h_graph": "RECENT %d",
         "p_proc": "PROCESSES", "p_now": "NOW RUNNING", "p_hist": "RUN HISTORY",
+        "p_slices": "SLICES",
+        "slices_tag": "%d slices · %d verdicts · %d%% first-try pass · avg %.1f attempts",
+        "slices_tag_none": "%d slices · no verdicts yet (cron sync excluded)",
+        "slices_empty": "no slices yet · record one with af_ledger.py",
+        "slices_show": "showing %d / %d (in window)",
+        "sl_planned": "PLANNED", "sl_running": "RUNNING", "sl_passed": "PASSED",
+        "sl_rejected": "REJECTED", "sl_failed": "FAILED", "sl_aborted": "ABORTED",
+        "th_slice": "SLICE", "th_attempt": "ATTEMPT", "th_verdict": "VERDICT",
+        "th_runs": "RUNS", "th_updated": "UPDATED",
+        "vd_pass": "PASS", "vd_reject": "REJECT", "vd_abort": "ABORT", "vd_na": "NA",
         "th_time": "TIME", "th_worker": "WORKER", "th_project": "PROJECT", "th_task": "TASK",
         "th_state": "STATE", "th_tokens": "TOKENS", "th_cost": "COST", "th_dur": "DUR",
         "dur_tip": "active time: event-stream segments, split when idle > 20 min (a session resumed next day is not one long run)",
@@ -1135,8 +1278,8 @@ window.__netInit = function(){
     return edges.filter(function(g){
       var a = g.getAttribute('data-a'), b = g.getAttribute('data-b'), pr = g.getAttribute('data-proj');
       if(a === id || b === id) return true;
-      if(id.indexOf('p:') === 0 && pr === id.slice(2)) return true;          // 项目：它名下的所有派活
-      if(id.indexOf('t:') === 0 && pr && a === 'bus:' + pr) return true;     // 任务：连到它项目的那条总线
+      if(id.indexOf('p:') === 0 && pr === id.slice(2)) return true;          // project: all dispatches under it
+      if(id.indexOf('t:') === 0 && pr && a === 'bus:' + pr) return true;     // task: the bus into its project
       return false;
     });
   }
@@ -1210,7 +1353,7 @@ SWAP_JS = """
     var y = window.scrollY;
     var om = document.querySelector('meta[http-equiv=refresh]');
     var nm = doc.querySelector('meta[http-equiv=refresh]');
-    if(om) om.parentNode.removeChild(om);                 // 换视图重算自刷计时，别刚换完就整页刷
+    if(om) om.parentNode.removeChild(om);                 // re-arm the refresh timer; don't reload right after a switch
     if(nm){
       var m = document.createElement('meta');
       m.setAttribute('http-equiv','refresh'); m.setAttribute('content', nm.getAttribute('content'));
@@ -1238,7 +1381,7 @@ SWAP_JS = """
     a.classList.add('busy');
     var my = ++token;
     function done(html){
-      if(my !== token) return;                            // 连点只认最后一次
+      if(my !== token) return;                            // only honour the last click
       a.classList.remove('busy');
       remember(url, html);
       applyDoc(url, html);
@@ -1321,11 +1464,14 @@ def processes_panel(procs, recs):
 
 
 def render_pixel(recs, refresh, lang="zh", days=14, rows=20, graph_n=12, procs=None, cur=None,
-                 tdays=7, projs=6, scope="all"):
+                 tdays=7, projs=6, scope="all", sdays=7):
     LANG["v"] = "en" if lang == "en" else "zh"
     cur = cur or {"lang": lang, "days": days, "rows": rows, "graph": graph_n,
-                  "tdays": tdays, "projs": projs, "scope": scope}
+                  "tdays": tdays, "projs": projs, "scope": scope, "sdays": sdays}
+    cur = dict(cur)
+    cur.setdefault("sdays", sdays)
     CUR.clear(); CUR.update(cur)
+    sdays = int(cur.get("sdays", sdays))
     procs = procs or []
     row_limit = int(rows)
     now = datetime.now(TZ)
@@ -1342,9 +1488,7 @@ def render_pixel(recs, refresh, lang="zh", days=14, rows=20, graph_n=12, procs=N
     grp_today = {k: round(v, 2) for k, v in grp_today.items()}
     cny_today = round(sum(grp_today.values()), 2)   # 先各自四舍五入再加：明细相加必须等于合计
     cost_break = " · ".join(f"{k} ¥{v:.2f}" for k, v in grp_today.items() if v)
-    cost_today_tip = (f"今日 0:00 起 · 估算合计 ¥{cny_today:.2f}（{cost_break}）· "
-                      f"Pi 组含 Pi/Pi·rpc/Codex，Hermes 组含主循环与子 agent · {PRICE_NOTE} · "
-                      f"只是按 token 单价推算，不是账单实付")
+    cost_today_tip = T("cost_today_tip", cny_today, cost_break, T("price_note"))
     maxtok = max([r.get("tokens") or 0 for r in recs] + [1])
 
     head = f"""<!doctype html><html lang="{'zh-CN' if lang == 'zh' else 'en'}"><head><meta charset="utf-8">
@@ -1364,7 +1508,7 @@ def render_pixel(recs, refresh, lang="zh", days=14, rows=20, graph_n=12, procs=N
     <div class="lbl px">{T("local_time")}</div>
     <div class="lcd"><div class="t px">{now:%H:%M:%S}</div></div>
     <div class="d px"><span>{now:%m-%d} {weekday_label(now.weekday())}</span><span>{T("sync")} <i class="blink"></i></span></div>
-    <div class="lang-sw"><span class="lbl px" style="margin-right:6px">{T("lang")}</span>{_ctl_grp("lang", [("zh", "中文"), ("en", "EN")], lang)}</div>
+    <div class="lang-sw"><span class="lbl px" style="margin-right:6px">{T("lang")}</span>{_ctl_grp("lang", [("zh", T("lang_zh")), ("en", T("lang_en"))], lang)}</div>
   </div>
 </div>
 
@@ -1389,7 +1533,7 @@ def render_pixel(recs, refresh, lang="zh", days=14, rows=20, graph_n=12, procs=N
   </div>
 </div>"""
 
-    charts = charts_html(recs, days, graph_n, procs, tdays, projs, scope) + network_block(recs, graph_n)
+    charts = charts_html(recs, days, graph_n, procs, tdays, projs, scope, sdays)
 
     live = ""
     if running:
@@ -1408,7 +1552,7 @@ def render_pixel(recs, refresh, lang="zh", days=14, rows=20, graph_n=12, procs=N
             cards.append(f"""
 <div class="panel">
   <div class="panel-h"><i class="sq"></i><h2 class="px">{T("p_now")}</h2>{nth}
-    <div class="right"><span class='tag live px' title='已运行 {dur_text(r)}'>ELAPSED {dur_lcd(r)}</span>
+    <div class="right"><span class='tag live px' title='{T("elapsed")} {dur_text(r)}'>ELAPSED {dur_lcd(r)}</span>
     <span class="tag px">{human_tok(r.get('tokens')).upper()} TOK</span>
     <span class="tag px" title="{e(cost_tip(r))}">{cost_text(r)}</span></div></div>
   <div class="live">
@@ -1558,10 +1702,11 @@ def demo_procs(lang="zh"):
 
 
 def serve(port, style, refresh, demo, lang="zh", days=14, rows=20, graph_n=12,
-          tdays=7, projs=6, scope="all", host="127.0.0.1"):
+          tdays=7, projs=6, scope="all", sdays=7, host="127.0.0.1"):
     """小 HTTP 服务：每次请求重新采集并渲染；页面自带 meta refresh 自动刷新。
 
     查询参数：?lang=zh|en &days=7|14|30 &rows=20|50|100 &graph=6|12|24 &scope=all|dg
+             &tdays=7|14|30 &projs=4|6|10 &sdays=7|14|30
     """
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from urllib.parse import urlparse, parse_qs
@@ -1598,21 +1743,24 @@ def serve(port, style, refresh, demo, lang="zh", days=14, rows=20, graph_n=12,
             want_tdays = int(pick("tdays", [7, 14, 30], tdays))
             want_projs = int(pick("projs", [4, 6, 10], projs))
             want_scope = pick("scope", ["all", "dg"], scope)
+            want_sdays = int(pick("sdays", [7, 14, 30], sdays))
             want_style = "clean" if "style=clean" in self.path else style
             key = (want_style, want_lang, want_days, want_rows, want_graph, want_tdays, want_projs,
-                   want_scope)
+                   want_scope, want_sdays)
             ent = memo.get(key)
             if not ent or time.time() - ent[0] > 2:
                 recs = get_recs(want_lang)
                 procs = demo_procs(want_lang) if demo else W.scan_processes()
                 cur = {"lang": want_lang, "days": want_days, "rows": want_rows, "graph": want_graph,
-                       "tdays": want_tdays, "projs": want_projs, "scope": want_scope}
+                       "tdays": want_tdays, "projs": want_projs, "scope": want_scope,
+                       "sdays": want_sdays}
                 if want_style == "clean":
                     doc = render(recs, refresh)
                 else:
                     doc = render_pixel(recs, refresh, lang=want_lang, days=want_days,
                                        rows=want_rows, graph_n=want_graph, procs=procs, cur=cur,
-                                       tdays=want_tdays, projs=want_projs, scope=want_scope)
+                                       tdays=want_tdays, projs=want_projs, scope=want_scope,
+                                       sdays=want_sdays)
                 ent = (time.time(), doc.encode("utf-8"))
                 memo[key] = ent
             body = ent[1]
@@ -1658,12 +1806,13 @@ def main():
     ap.add_argument("--projs", type=int, choices=[4, 6, 10], default=6, help="项目图显示几个")
     ap.add_argument("--scope", choices=["all", "dg"], default="all",
                     help="时间线范围：all=含 Hermes 主循环，dg=只看派出去的任务")
+    ap.add_argument("--sdays", type=int, choices=[7, 14, 30], default=7, help="切片面板天数")
     args = ap.parse_args()
 
     if args.serve:
         return serve(args.serve, args.style, 0 if args.no_refresh else args.refresh, args.demo,
                      lang=args.lang, days=args.days, rows=args.rows, graph_n=args.graph,
-                     tdays=args.tdays, projs=args.projs, scope=args.scope,
+                     tdays=args.tdays, projs=args.projs, scope=args.scope, sdays=args.sdays,
                      host=args.host)
 
     recs = demo_recs(args.lang) if args.demo else W.collect()
@@ -1672,10 +1821,10 @@ def main():
         procs = demo_procs(args.lang) if args.demo else W.scan_processes()
         doc = render_pixel(recs, refresh, lang=args.lang, days=args.days, rows=args.rows,
                            graph_n=args.graph, procs=procs, tdays=args.tdays, projs=args.projs,
-                           scope=args.scope,
+                           scope=args.scope, sdays=args.sdays,
                            cur={"lang": args.lang, "days": args.days, "rows": args.rows,
                                 "graph": args.graph, "tdays": args.tdays, "projs": args.projs,
-                                "scope": args.scope})
+                                "scope": args.scope, "sdays": args.sdays})
         out = args.out or PIXEL_CACHE
     else:
         doc = render(recs, refresh)

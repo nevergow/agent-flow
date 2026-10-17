@@ -28,6 +28,17 @@
 语言切换（中文/EN）在右上时钟下面。选择全部写进 URL，可以直接分享：
 `?days=30&tdays=14&projs=4&graph=24&rows=100&lang=en&scope=all`。
 
+### 切片面板（读账本）
+
+`SLICES` 面板在派活拓扑和 `NOW RUNNING` 之间，数据只读自 `af_ledger.py` 写的
+SQLite 账本（`~/.hermes/state/agent_flow/ledger.db`，可用 `AF_LEDGER` 覆盖）：
+按需求分组显示状态、执行者、尝试次数、最近裁决、运行次数和更新时间，标题栏可切
+7 / 14 / 30 天窗口。记一条切片：
+
+```bash
+python3 af_ledger.py new-slice --req <ID> --goal "…" --executor pi
+```
+
 切控件是**原地换 DOM**，不是整页重新导航：鼠标移上去就先预取那一版（约 0.1 秒），
 点下去立刻切、滚动位置不丢。服务器把采集结果复用 4 秒、并按文件 mtime 缓存解析结果，
 所以切范围只重渲染，不再重解所有会话。

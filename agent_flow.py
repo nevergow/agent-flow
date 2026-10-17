@@ -749,7 +749,7 @@ def build_state(window_min=15, history=None):
     return {"generated_at": now, "window_min": window_min, "live": True,
             "counts": {"active_tasks": len(active), "tokens_5m": sum(t["tokens_recent"] for t in tasks),
                        "cost_today": round(cost_today, 3),
-                       "cost_window": round(sum(t.get("cost") or 0 for t in tasks), 3)},
+                       "cost_window": round(sum(t.get("cost") or 0 for t in recent), 3)},
             "nodes": nodes, "edges": edges, "timeline": timeline,
             "history_span": {"tasks": len(hist["tasks"]), "from": min(
                 [(r.get("start") or 0) for r in hist["tasks"].values()] or [now])}}

@@ -21,14 +21,19 @@ run history.
 | `TOKENS / 14D` | stacked cache / input / output bars per day, with the cost curve on top |
 | `TIMELINE / 7D` | every run as a band on a local 0–24h clock, coloured by worker |
 | `PROJECTS` | tokens, run count and share per workspace |
-| `DURATION` | recent runs by wall-clock length, green / amber / red by outcome |
+| `PROCESSES` | the agent processes actually running right now — real OS PID, project, elapsed, CPU, task |
 | `DELEGATION GRAPH` | orchestrator → worker → task nodes → workspace, one lane per dispatch; **hover a node to keep only its links lit**, click to pin, `Esc` to clear |
 | `NOW RUNNING` | the current task with its last tool calls, elapsed time, tokens, cost |
 | `RUN HISTORY` | every run: time, worker, project, task, state, tokens (12-cell bar), cost, duration |
 
+Every panel is adjustable from the bar under the header — time range (7 / 14 / 30
+days), history rows (20 / 50 / 100), how many runs the graph shows (6 / 12 / 24)
+and the UI language (中文 / EN). Choices live in the URL:
+`?days=30&rows=100&graph=24&lang=en`.
+
 Refresh is a plain `<meta http-equiv="refresh">` — no JS framework, no build
-step, no network calls. The page is generated from scratch on every request, so
-what you see is always the state of the logs at that moment.
+step, no network calls. The page is regenerated on every request, so what you
+see is always the state of the logs at that moment.
 
 ### Reading the delegation graph
 
@@ -60,6 +65,10 @@ Options:
 | Flag | Meaning |
 |---|---|
 | `--style pixel` | the retro pixel board (default is `clean`, a plain light table) |
+| `--lang zh\|en` | UI language for the one-shot render (the served page also takes `?lang=`) |
+| `--days N` | chart range: 7, 14 or 30 |
+| `--rows N` | history rows: 20, 50 or 100 |
+| `--graph N` | runs drawn in the delegation graph: 6, 12 or 24 |
 | `--serve PORT` | serve on 127.0.0.1 and re-collect on each request |
 | `--demo` | synthetic sessions — safe for screenshots, reads no local files |
 | `--refresh N` | auto-reload interval in seconds (default 5, `0` disables) |

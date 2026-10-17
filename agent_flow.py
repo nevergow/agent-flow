@@ -630,12 +630,12 @@ def upsert_history(h, tasks, now):
 
 NODE_DEFS = [
     ("neil", "Neil", "human", 0, 46),
-    ("hermes", "Hermes 主循环", "orchestrator", 1, 58),
+    ("hermes", "Hermes", "orchestrator", 1, 58),
     ("dsh", "DSH headless", "worker", 2, 48),
     ("pi", "Pi", "worker", 2, 40),
     ("pi-rpc", "Pi RPC", "worker", 2, 38),
     ("codex", "Codex CLI", "worker", 2, 36),
-    ("subagent", "Hermes 子 agent", "worker", 2, 38),
+    ("subagent", "Hermes Subagent", "worker", 2, 38),
 ]
 KIND2NODE = {"dsh": "dsh", "pi": "pi", "pi-rpc": "pi-rpc", "codex": "codex", "subagent": "subagent"}
 
@@ -1154,14 +1154,14 @@ def demo_state(window_min=15):
         {"id": "neil", "label": "Neil", "role": "human", "layer": 0, "base": 46, "busy": 1.0,
          "sessions": 1, "tokens_window": 0, "tokens_recent": 0, "cost_window": 0.0, "cost_recent": 0.0,
          "stage": None, "note": "指令源"},
-        {"id": "hermes", "label": "Hermes 主循环", "role": "orchestrator", "layer": 1, "base": 58, "busy": 1.0,
+        {"id": "hermes", "label": "Hermes", "role": "orchestrator", "layer": 1, "base": 58, "busy": 1.0,
          "sessions": 1, "tokens_window": 0, "tokens_recent": 0, "cost_window": 0.0, "cost_recent": 0.0,
          "stage": "编排", "note": "调度 / 验收"},
         mk("dsh", "DSH headless", "worker", 2, 48, "沙箱 · 长链"),
         mk("pi", "Pi", "worker", 2, 40, "YOLO · 单点"),
         mk("pi-rpc", "Pi RPC", "worker", 2, 38, "常驻 · 可 steer"),
         mk("codex", "Codex CLI", "worker", 2, 36, "按需"),
-        mk("subagent", "Hermes 子 agent", "worker", 2, 38, "delegate_task"),
+        mk("subagent", "Hermes Subagent", "worker", 2, 38, "delegate_task"),
         {"id": "proj:demo-app", "label": "demo-app", "role": "project", "layer": 3, "base": 30,
          "busy": min(1.0, proj_running * 0.5 + proj_tasks * 0.1), "sessions": proj_running,
          "tokens_window": 0, "tokens_recent": 0,

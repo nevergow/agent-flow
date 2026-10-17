@@ -392,6 +392,59 @@ def scan_pi_rpc():
 
 # -------------------------------------------------------------------------- 输出
 
+def scan_processes():
+    """当前真正在跑的 agent OS 进程（只读 ps / lsof），给看板的 PROCESSES 面板用。
+
+    返回 [{pid, agent, cwd, project, elapsed, cpu, task}]，按 CPU 降序。
+    """
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,pcpu=,etime=,command="],
+                             capture_output=True, text=True, timeout=6).stdout
+    except Exception:
+        return []
+    rows = []
+    for line in out.splitlines():
+        parts = line.strip().split(None, 3)
+        if len(parts) < 4:
+            continue
+        pid, cpu, etime, cmd = parts
+        if "worker_dashboard" in cmd or "scan_processes" in cmd:
+            continue
+        if cmd.startswith("sh -c "):      # pnpm/sh 包装层，真正的 node 进程另有一行
+            continue
+        agent = None
+        if "bin.ts headless" in cmd:
+            agent = "DSH"
+            m = re.search(r"bin\.ts headless\s+(.+)$", cmd)
+            task = (m.group(1).strip() if m else "")[:60]
+        elif "pi_rpc.py" in cmd:
+            agent, task = "Pi·rpc", ""
+        elif re.search(r"(^|/)pi\b.*\s-p\s", cmd) or "bundle/cli.js" in cmd:
+            agent, task = "Pi", ""
+        elif "codex" in cmd and "app-server" not in cmd and "happy" not in cmd:
+            agent, task = "Codex", ""
+        if not agent:
+            continue
+        cwd = _pid_cwd(pid)
+        rows.append({"pid": int(pid), "agent": agent, "cwd": cwd,
+                     "project": os.path.basename(cwd.rstrip("/")) if cwd else "?",
+                     "elapsed": etime, "cpu": cpu, "task": task})
+    rows.sort(key=lambda r: -float(r["cpu"] or 0))
+    return rows
+
+
+def _pid_cwd(pid):
+    try:
+        out = subprocess.run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+                             capture_output=True, text=True, timeout=4).stdout
+    except Exception:
+        return ""
+    for line in out.splitlines():
+        if line.startswith("n"):
+            return line[1:].strip()
+    return ""
+
+
 def collect(workers):
     recs = []
     if "dsh" in workers:

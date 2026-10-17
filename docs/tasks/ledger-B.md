@@ -4,7 +4,7 @@
 [Target]       /Users/wuzeqin/Projects/agent-flow
 [Executor]     DSH headless
 [Attempt]      1
-[Anchor]       645d298cfeb6198a73489edcfe00096e2f775183（开工前 git status --porcelain 必须为空）
+[Anchor]       派发时的 HEAD（任务书本身已在库里；派发命令会传 ANCHOR=<hash>，验收用 `git diff --name-only $ANCHOR`）
 [Scope_Allow]  worker_dashboard.py, README.md, README.zh-CN.md
 [Scope_Forbid] 其余全部文件；特别是 af_ledger.py（数据层已验收，接口只读）、worker_runs.py、
                agent_flow.py/html、docs/、任何 .git 写操作

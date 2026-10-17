@@ -386,11 +386,12 @@ def add_verdict(slice_id, result, reason=None, artifacts=None, retry=False,
 def _list_payload(con, since_label, cut, limit):
     sql = (
         "select s.id, s.req_id, s.goal, s.executor, s.state, s.attempt,"
-        " s.created, s.updated,"
+        " s.created, s.updated, coalesce(q.text, '') as req_text,"
         " (select count(*) from runs r where r.slice_id = s.id) as runs_n,"
         " (select v.result from verdicts v where v.slice_id = s.id"
         "  order by v.ts desc, v.rowid desc limit 1) as last_verdict"
-        " from slices s where s.created >= ?"
+        " from slices s left join requests q on q.id = s.req_id"
+        " where s.created >= ?"
         " order by s.created desc, s.id"
     )
     params = [cut]
@@ -407,6 +408,7 @@ def _list_payload(con, since_label, cut, limit):
             "state": r["state"],
             "attempt": int(r["attempt"]),
             "req_id": r["req_id"],
+            "req_text": r["req_text"],
             "created": float(r["created"]),
             "updated": float(r["updated"]),
             "runs": int(r["runs_n"]),

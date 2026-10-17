@@ -43,8 +43,8 @@ edges" graph:
   have many edges (one per step), drawn as separate lanes
 - **Live** — running steps are solid green, awaiting-acceptance dashed red, and
   finished ones faint grey; the whole board refreshes every 5 seconds
-- A Gantt strip of recent dispatches plus a 24-hour replay scrubber sit at the
-  bottom.
+- Every row in `RUN HISTORY` is one dispatch, so the board doubles as an
+  audit trail from "you asked" to "what it cost".
 
 ## Quick start
 
@@ -83,8 +83,6 @@ Page option: `?static=1` disables the live refresh (handy for screenshots).
   the graph — red means "finished, waiting for your review"
 - **Stage** is inferred from tool names in the last 3 minutes: `侦察` (read-only),
   `实现` (writes), `自检` (test commands), `收尾`.
-- **Click** a node or an edge for details, including ready-to-paste commands
-  (`worker_runs.py show <key>`, `tail -f <log>`).
 
 UI strings are Chinese; the data model and API are language-neutral, so
 translating the front end is a string-table change.

@@ -657,10 +657,11 @@ def build_state(window_min=15, history=None):
         save_history(hist)
 
     def agg(kind):
-        ts = [t for t in tasks if t["kind"] == kind]
+        ts = [t for t in tasks if t["kind"] == kind and t["last_event_ago"] <= window_s]
         return {
             "sessions": len([t for t in ts if t["running"]]),
             "tokens_recent": sum(t["tokens_recent"] for t in ts),
+            "tokens_window": sum(t["tokens"] for t in ts),
             "cost_recent": sum(t["cost_recent"] for t in ts),
             "cost_window": sum(t["cost"] for t in ts),
             "stage": next((t["stage"] for t in ts if t["running"]), None),
@@ -699,6 +700,7 @@ def build_state(window_min=15, history=None):
             busy = min(1.0, a["sessions"] * 0.55 + a["tokens_recent"] / 250_000)
             nodes.append({"id": nid, "label": label, "role": role, "layer": layer, "base": base,
                           "busy": busy, "sessions": a["sessions"], "tokens_recent": a["tokens_recent"],
+                          "tokens_window": a["tokens_window"],
                           "cost_recent": a["cost_recent"], "cost_window": a["cost_window"],
                           "stage": a["stage"], "note": {
                               "dsh": "沙箱 · 长链", "pi": "YOLO · 单点", "pi-rpc": "常驻 · 可 steer",
@@ -730,7 +732,7 @@ def build_state(window_min=15, history=None):
                       "cost": round(t.get("cost") or 0, 4), "cost_recent": round(t.get("cost_recent") or 0, 4),
                       "stage": t["stage"], "key": t["key"], "log": t["path"], "project": t.get("project"),
                       "evidence": t.get("evidence", "inferred"), "parent": t.get("parent")})
-        if t.get("project") and t["project"] not in ("?", "子 agent", "pi-rpc"):
+        if state != "recent" and t.get("project") and t["project"] not in ("?", "子 agent", "pi-rpc"):
             edges.append({"id": f"e:{nid}-proj:{t['key']}", "from": nid, "to": "proj:" + t["project"],
                           "kind": "workspace", "label": "", "state": state, "started_at": t["start"],
                           "ended_at": t["last_event"], "idx": 0, "tokens": 0, "cost": 0.0,
@@ -795,7 +797,7 @@ def replay_state(t, history=None):
                       "key": r["key"], "log": r.get("log"), "project": r.get("project"),
                       "evidence": r.get("evidence", "inferred")})
         proj = r.get("project")
-        if proj and proj not in ("?", "子 agent", "pi-rpc"):
+        if state != "recent" and proj and proj not in ("?", "子 agent", "pi-rpc"):
             pid = "proj:" + proj
             if pid not in by_id:
                 by_id[pid] = {"id": pid, "label": proj, "role": "project", "layer": 3, "base": 30,
@@ -1030,70 +1032,97 @@ def backfill(days=7):
 # ------------------------------------------------------------------- 演示数据
 
 def demo_state(window_min=15):
-    """`--demo`：不读任何本机数据，返回一份固定场景，便于截图 / 试用。"""
+    """`--demo`：不读任何本机数据，返回一份固定场景（所有数字都从同一份任务表推）。"""
     now = now_ts()
-    t0 = now - 18 * 60
+    window_s = window_min * 60
     tasks = [
-        {"kind": "dsh", "key": "d1", "start": t0 + 60, "last": now - 5,
-         "tokens": 1_846_000, "cost": 0.42, "stage": "实现", "state": "active",
-         "task": "Step 12：缓存预热 + 增量视图（长链任务，沙箱内改 4 个文件）", "project": "demo-app"},
-        {"kind": "pi-rpc", "key": "p1", "start": t0 + 420, "last": now - 40,
-         "tokens": 126_000, "cost": 0.031, "stage": "侦察", "state": "active",
-         "task": "只读侦察：定位解码热点，列出候选改动点", "project": "demo-app"},
-        {"kind": "codex", "key": "c1", "start": now - 9 * 60, "last": now - 6 * 60,
-         "tokens": 231_000, "cost": 0.088, "stage": "自检", "state": "waiting",
-         "task": "跑一遍跨平台构建冒烟，贴真实输出", "project": ""},
-        {"kind": "subagent", "key": "s1", "start": now - 12 * 60, "last": now - 8 * 60,
-         "tokens": 449_000, "cost": 0.55, "stage": "执行", "state": "recent",
-         "task": "并行调研：三个第三方库的 API 差异", "project": ""},
-        {"kind": "pi", "key": "q1", "start": now - 26 * 60, "last": now - 22 * 60,
-         "tokens": 64_000, "cost": 0.016, "stage": "实现", "state": "recent",
-         "task": "单点实现：补一个边界用例", "project": "demo-app"},
+        {"kind": "dsh", "key": "d1", "start": now - 17 * 60, "end": now - 5,
+         "tokens": 1_846_000, "cost": 0.42, "tokens_recent": 612_000, "cost_recent": 0.14,
+         "stage": "实现", "state": "active", "project": "demo-app",
+         "task": "Step 12：缓存预热 + 增量视图（长链任务，沙箱内改 4 个文件）"},
+        {"kind": "pi-rpc", "key": "p1", "start": now - 11 * 60, "end": now - 1,
+         "tokens": 126_000, "cost": 0.031, "tokens_recent": 54_000, "cost_recent": 0.013,
+         "stage": "侦察", "state": "active", "project": "demo-app",
+         "task": "只读侦察：定位解码热点，列出候选改动点"},
+        {"kind": "codex", "key": "c1", "start": now - 9 * 60, "end": now - 6 * 60,
+         "tokens": 231_000, "cost": 0.088, "tokens_recent": 0, "cost_recent": 0.0,
+         "stage": "自检", "state": "waiting", "project": "",
+         "task": "跑一遍跨平台构建冒烟，贴真实输出"},
+        {"kind": "subagent", "key": "s1", "start": now - 12 * 60, "end": now - 8 * 60,
+         "tokens": 449_000, "cost": 0.55, "tokens_recent": 0, "cost_recent": 0.0,
+         "stage": "执行", "state": "recent", "project": "",
+         "task": "并行调研：三个第三方库的 API 差异"},
+        # 窗口外的历史任务：只体现在"待命"池的 Pi 上，不进甘特
+        {"kind": "pi", "key": "q1", "start": now - (window_min + 11) * 60, "end": now - (window_min + 7) * 60,
+         "tokens": 64_000, "cost": 0.016, "tokens_recent": 0, "cost_recent": 0.0,
+         "stage": "实现", "state": "recent", "project": "demo-app",
+         "task": "单点实现：补一个边界用例"},
     ]
+    inwin = [t for t in tasks if now - t["end"] <= window_s]
+    kinds = ["dsh", "pi", "pi-rpc", "codex", "subagent"]
+    aggs = {}
+    for k in kinds:
+        ts = [t for t in inwin if t["kind"] == k]
+        aggs[k] = {"sessions": len([t for t in ts if t["state"] == "active"]),
+                   "tokens_window": sum(t["tokens"] for t in ts),
+                   "tokens_recent": sum(t["tokens_recent"] for t in ts),
+                   "cost_window": sum(t["cost"] for t in ts),
+                   "cost_recent": sum(t["cost_recent"] for t in ts),
+                   "stage": next((t["stage"] for t in ts if t["state"] == "active"), None)}
+
+    def mk(nid, label, role, layer, base, note):
+        a = aggs.get(nid, {"sessions": 0, "tokens_window": 0, "tokens_recent": 0,
+                           "cost_window": 0.0, "cost_recent": 0.0, "stage": None})
+        busy = min(1.0, a["sessions"] * 0.55 + a["tokens_recent"] / 250_000)
+        return {"id": nid, "label": label, "role": role, "layer": layer, "base": base,
+                "busy": busy, **a, "note": note}
+
+    proj_running = len([t for t in inwin if t.get("project") == "demo-app" and t["state"] == "active"])
+    proj_tasks = len([t for t in inwin if t.get("project") == "demo-app"])
     nodes = [
         {"id": "neil", "label": "Neil", "role": "human", "layer": 0, "base": 46, "busy": 1.0,
-         "sessions": 1, "tokens_recent": 0, "cost_recent": 0.0, "cost_window": 0.0, "stage": None, "note": "指令源"},
+         "sessions": 1, "tokens_window": 0, "tokens_recent": 0, "cost_window": 0.0, "cost_recent": 0.0,
+         "stage": None, "note": "指令源"},
         {"id": "hermes", "label": "Hermes 主循环", "role": "orchestrator", "layer": 1, "base": 58, "busy": 1.0,
-         "sessions": 1, "tokens_recent": 0, "cost_recent": 0.0, "cost_window": 0.0, "stage": "编排", "note": "调度 / 验收"},
-        {"id": "dsh", "label": "DSH headless", "role": "worker", "layer": 2, "base": 48, "busy": 1.0,
-         "sessions": 1, "tokens_recent": 1_240_000, "cost_recent": 0.28, "cost_window": 0.42,
-         "stage": "实现", "note": "沙箱 · 长链"},
-        {"id": "pi", "label": "Pi", "role": "worker", "layer": 2, "base": 40, "busy": 0.0,
-         "sessions": 0, "tokens_recent": 0, "cost_recent": 0.0, "cost_window": 0.016, "stage": None, "note": "YOLO · 单点"},
-        {"id": "pi-rpc", "label": "Pi RPC", "role": "worker", "layer": 2, "base": 38, "busy": 0.62,
-         "sessions": 1, "tokens_recent": 126_000, "cost_recent": 0.031, "cost_window": 0.031,
-         "stage": "侦察", "note": "常驻 · 可 steer"},
-        {"id": "codex", "label": "Codex CLI", "role": "worker", "layer": 2, "base": 36, "busy": 0.0,
-         "sessions": 0, "tokens_recent": 0, "cost_recent": 0.0, "cost_window": 0.088, "stage": None, "note": "按需"},
-        {"id": "subagent", "label": "Hermes 子 agent", "role": "worker", "layer": 2, "base": 38, "busy": 0.0,
-         "sessions": 0, "tokens_recent": 0, "cost_recent": 0.0, "cost_window": 0.55, "stage": None, "note": "delegate_task"},
-        {"id": "proj:demo-app", "label": "demo-app", "role": "project", "layer": 3, "base": 30, "busy": 0.8,
-         "sessions": 1, "tokens_recent": 0, "cost_recent": 0.0, "cost_window": 0.47, "stage": None,
-         "note": "2 个任务在窗内"},
+         "sessions": 1, "tokens_window": 0, "tokens_recent": 0, "cost_window": 0.0, "cost_recent": 0.0,
+         "stage": "编排", "note": "调度 / 验收"},
+        mk("dsh", "DSH headless", "worker", 2, 48, "沙箱 · 长链"),
+        mk("pi", "Pi", "worker", 2, 40, "YOLO · 单点"),
+        mk("pi-rpc", "Pi RPC", "worker", 2, 38, "常驻 · 可 steer"),
+        mk("codex", "Codex CLI", "worker", 2, 36, "按需"),
+        mk("subagent", "Hermes 子 agent", "worker", 2, 38, "delegate_task"),
+        {"id": "proj:demo-app", "label": "demo-app", "role": "project", "layer": 3, "base": 30,
+         "busy": min(1.0, proj_running * 0.5 + proj_tasks * 0.1), "sessions": proj_running,
+         "tokens_window": 0, "tokens_recent": 0,
+         "cost_window": sum(t["cost"] for t in inwin if t.get("project") == "demo-app"),
+         "cost_recent": 0.0, "stage": None, "note": f"{proj_tasks} 个任务在窗内"},
     ]
     edges = [{"id": "e:neil-hermes", "from": "neil", "to": "hermes", "kind": "request", "label": "指令",
-              "state": "active", "started_at": t0, "ended_at": now, "idx": 0, "cost": 0.0, "tokens": 0}]
-    for i, t in enumerate(tasks):
-        nid = {"dsh": "dsh", "pi-rpc": "pi-rpc", "pi": "pi", "codex": "codex", "subagent": "subagent"}[t["kind"]]
-        edges.append({"id": f"e:{t['key']}", "from": "hermes", "to": nid, "kind": "dispatch",
+              "state": "active", "started_at": now - 20 * 60, "ended_at": now, "idx": 0, "cost": 0.0, "tokens": 0}]
+    for t in tasks:
+        if t not in inwin:
+            continue
+        edges.append({"id": f"e:{t['key']}", "from": "hermes", "to": t["kind"], "kind": "dispatch",
                       "label": t["task"][:44], "full": t["task"], "state": t["state"],
-                      "started_at": t["start"], "ended_at": t["last"], "idx": 0,
-                      "tokens": t["tokens"], "cost": t["cost"], "tokens_recent": t["tokens"] if t["state"] == "active" else 0,
-                      "stage": t["stage"], "key": t["key"], "log": "",
-                      "project": t["project"] or None,
-                      "evidence": "registry" if t["kind"] in ("subagent",) else "process"})
-        if t["project"]:
-            edges.append({"id": f"e:{t['key']}:p", "from": nid, "to": "proj:" + t["project"], "kind": "workspace",
-                          "label": "", "state": t["state"], "started_at": t["start"], "ended_at": t["last"],
-                          "idx": 0, "tokens": 0, "cost": 0.0, "key": t["key"]})
-    timeline = [{"key": t["key"], "kind": t["kind"], "project": t["project"],
-                 "label": t["task"], "start": t["start"], "end": t["last"], "state": t["state"],
-                 "stage": t["stage"], "tokens": t["tokens"], "cost": t["cost"], "log": ""} for t in tasks]
+                      "started_at": t["start"], "ended_at": t["end"], "idx": 0,
+                      "tokens": t["tokens"], "cost": t["cost"], "tokens_recent": t["tokens_recent"],
+                      "stage": t["stage"], "key": t["key"], "log": "", "project": t["project"] or None,
+                      "evidence": "registry" if t["kind"] == "subagent" else "process"})
+        if t["state"] != "recent" and t["project"]:
+            edges.append({"id": f"e:{t['key']}:p", "from": t["kind"], "to": "proj:" + t["project"],
+                          "kind": "workspace", "label": "", "state": t["state"],
+                          "started_at": t["start"], "ended_at": t["end"], "idx": 0,
+                          "tokens": 0, "cost": 0.0, "key": t["key"]})
+    timeline = [{"key": t["key"], "kind": t["kind"], "project": t["project"], "label": t["task"],
+                 "start": t["start"], "end": t["end"], "state": t["state"], "stage": t["stage"],
+                 "tokens": t["tokens"], "cost": t["cost"], "log": ""} for t in inwin]
     return {"generated_at": now, "window_min": window_min, "live": True, "demo": True,
-            "counts": {"active_tasks": 2, "tokens_5m": 1_366_000, "cost_today": 1.11,
-                       "cost_window": 1.11},
+            "counts": {"active_tasks": len([t for t in inwin if t["state"] == "active"]),
+                       "tokens_5m": sum(t["tokens_recent"] for t in inwin),
+                       "cost_today": round(sum(t["cost"] for t in inwin), 3),
+                       "cost_window": round(sum(t["cost"] for t in inwin), 3)},
             "nodes": nodes, "edges": edges, "timeline": timeline,
-            "history_span": {"tasks": len(tasks), "from": t0}}
+            "history_span": {"tasks": len(tasks), "from": min(t["start"] for t in tasks)}}
 
 
 # ------------------------------------------------------------------------ HTTP

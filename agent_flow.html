@@ -57,18 +57,20 @@
   @keyframes dash{to{stroke-dashoffset:-18}}
 
   #nodes{position:absolute;inset:0}
-  .lane{position:absolute;top:10px;transform:translateX(-50%);font-size:9px;letter-spacing:.16em;
+  .lane{position:absolute;top:52px;transform:translateX(-50%);font-size:9px;letter-spacing:.16em;
     color:rgba(148,163,184,.55);white-space:nowrap;z-index:2}
-  .band{position:absolute;top:34px;bottom:96px;border-radius:14px;background:rgba(148,163,184,.028);
+  .band{position:absolute;top:66px;bottom:134px;border-radius:14px;background:rgba(148,163,184,.028);
     border:1px solid rgba(148,163,184,.05)}
-  #brief{position:absolute;left:18px;top:38px;width:286px;z-index:3;background:rgba(13,18,25,.9);
-    border:1px solid var(--line);border-radius:11px;padding:10px 12px}
-  #brief h4{margin:0 0 6px;font-size:9px;letter-spacing:.14em;color:rgba(148,163,184,.6);font-weight:500}
-  #brief .item{display:flex;align-items:baseline;gap:7px;margin:4px 0;font-size:11px}
-  #brief .item .nm{color:var(--text);font-weight:600}
-  #brief .item .st{color:var(--active)}
-  #brief .item .meta{margin-left:auto;color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
-  #brief .empty{color:var(--dim);font-size:11px;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #brief{position:absolute;left:18px;right:18px;top:6px;height:36px;z-index:3;display:flex;align-items:center;
+    gap:18px;padding:0 14px;border:1px solid var(--line);border-radius:10px;background:rgba(13,18,25,.9);
+    overflow:hidden}
+  #brief h4{margin:0;font-size:9px;letter-spacing:.14em;color:rgba(148,163,184,.6);font-weight:500;
+    white-space:nowrap}
+  #brief .bi{display:flex;align-items:baseline;gap:7px;font-size:11px;white-space:nowrap;min-width:0}
+  #brief .bi .nm{color:var(--text);font-weight:600}
+  #brief .bi .meta{color:var(--muted);font-variant-numeric:tabular-nums}
+  #brief .bi .task{color:var(--dim);overflow:hidden;text-overflow:ellipsis;max-width:280px}
+  #brief .empty{color:var(--dim);font-size:11px}
   /* 底部甘特 */
   #gantt{position:absolute;left:18px;right:18px;bottom:6px;height:118px;border-top:1px solid var(--line2);
     padding-top:7px}
@@ -93,6 +95,7 @@
   .card.sel{border-color:rgba(34,211,238,.6);box-shadow:0 0 0 1px rgba(34,211,238,.35),0 10px 30px rgba(0,0,0,.5)}
   .card .accent{position:absolute;left:0;top:9px;bottom:9px;width:3px;border-radius:3px}
   .card .row1{display:flex;align-items:center;gap:7px;padding-left:6px}
+  .card .mini-cost{font-size:9.5px;color:var(--muted);font-variant-numeric:tabular-nums;margin-left:auto}
   .card .name{font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1}
   .pill{font-size:9px;letter-spacing:.07em;padding:1px 6px;border-radius:999px;border:1px solid currentColor;
     white-space:nowrap}
@@ -230,7 +233,7 @@ const STATIC = new URLSearchParams(location.search).has("static");
 
 function esc(s){ return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 function fmtTok(n){ n = n||0; return n<1000?String(n):n<1e6?(n/1000).toFixed(1)+"k":(n/1e6).toFixed(2)+"M"; }
-function fmtCost(c){ c = c||0; return c<0.005?"¥0":c<1?"¥"+c.toFixed(2):"¥"+c.toFixed(1); }
+function fmtCost(c){ c = c||0; return c<0.005?"¥0":c<10?"¥"+c.toFixed(2):"¥"+c.toFixed(1); }
 function fmtDur(ms){ const s=Math.max(0,Math.round(ms/1000));
   return s<60?s+"s":s<3600?Math.floor(s/60)+"m"+String(s%60).padStart(2,"0")+"s":Math.floor(s/3600)+"h"+String(Math.floor(s%3600/60)).padStart(2,"0"); }
 function ago(ts){ const s=Date.now()/1000-ts; return s<60?Math.round(s)+"s":s<3600?Math.round(s/60)+"m":Math.round(s/3600)+"h"; }
@@ -244,7 +247,7 @@ function layout(){
   const stage = document.getElementById("stage");
   const W = stage.clientWidth, H = stage.clientHeight;
   const topoH = H - 128;
-  const midY = topoH * 0.50;
+  const midY = 46 + (topoH - 46) * 0.47;
   const byLayer = {};
   state.nodes.forEach(n => (byLayer[n.layer] = byLayer[n.layer] || []).push(n));
   const workers = byLayer[2] || [];
@@ -264,11 +267,12 @@ function layout(){
   const y02 = midY - 6 - (step2*(n2-1))/2;
   busyW.forEach((nd,i) => nodes.push({...nd, x: W*COL_X[2], y: y02 + step2*i, w: 186, mini:false}));
 
-  const poolX = W * 0.715, poolStep = 56;
+  const poolY = H - 128 - 42;
+  const poolX0 = W * 0.145;
   const nIdle = idleW.length;
-  const poolTop = midY - ((nIdle-1)*poolStep)/2;
-  idleW.forEach((nd,i) => nodes.push({...nd, x: poolX, y: poolTop + i*poolStep, w: 188, mini:true}));
-  poolBox = nIdle ? {x: poolX, top: poolTop - 34, bottom: poolTop + (nIdle-1)*poolStep + 28} : null;
+  idleW.forEach((nd,i) => nodes.push({...nd, x: poolX0 + i*205, y: poolY, w: 188, mini:true}));
+  poolBox = nIdle ? {left: poolX0 - 104, right: poolX0 + (nIdle-1)*205 + 104,
+                     top: poolY - 30, bottom: poolY + 30} : null;
 
   const projs = byLayer[3] || [], n3 = projs.length;
   const step3 = n3 > 1 ? Math.min(108, (topoH-170)/n3) : 0;
@@ -396,23 +400,23 @@ function renderNodes(){
   const W = stage.clientWidth, H = stage.clientHeight;
   let html = "";
   const bandW = [210, 250, 230, 220];
-  [0,1,2,3].forEach(L => { html += `<div class="band" style="left:${W*COL_X[L]-bandW[L]/2}px;width:${bandW[L]}px;top:30px;bottom:134px"></div>`; });
+  [0,1,2,3].forEach(L => { html += `<div class="band" style="left:${W*COL_X[L]-bandW[L]/2}px;width:${bandW[L]}px;top:66px;bottom:134px"></div>`; });
   [0,1,2,3].forEach(L => { html += `<div class="lane" style="left:${W*COL_X[L]}px">${LANES[L]}</div>`; });
-  html += `<div class="lane" style="left:${W*0.715}px">待命 IDLE</div>`;
 
   const live = edges.filter(e => e.kind === "dispatch" && (e.state === "active" || e.state === "waiting"));
   html += `<div id="brief"><h4>此刻</h4>` + (live.length ? live.slice(0,3).map(e => {
     const n = nodes.find(x => x.id === e.to);
     const el = (state.generated_at - (e.started_at || state.generated_at)) * 1000;
     const tag = e.state === "active" ? "在跑" : "待验收";
-    return `<div class="item"><span class="nm">${esc(n ? n.label.replace(" headless","") : "")}</span>
-      <span class="st" style="color:${e.state==='active'?'var(--active)':'var(--wait)'}">${tag}</span>
-      <span class="meta">${fmtDur(el)} · ${fmtCost(e.cost)}</span></div>
-      <div class="item"><span class="empty">${esc((e.label||"").slice(0,36))}</span></div>`;
-  }).join("") : `<div class="empty">没有任务在跑，也没有待验收的</div>`) + `</div>`;
+    const col = e.state === "active" ? "var(--active)" : "var(--wait)";
+    return `<div class="bi"><span class="nm">${esc(n ? n.label.replace(" headless","") : "")}</span>
+      <span style="color:${col}">${tag}${e.stage ? "·" + esc(e.stage) : ""}</span>
+      <span class="meta">${fmtDur(el)} · ${fmtCost(e.cost)}</span>
+      <span class="task">${esc((e.label||"").slice(0,30))}</span></div>`;
+  }).join("") : `<span class="empty">没有任务在跑，也没有待验收的</span>`) + `</div>`;
 
   if(poolBox)
-    html += `<div class="pool" style="left:${poolBox.x-98}px;width:196px;top:${poolBox.top}px;height:${poolBox.bottom-poolBox.top}px;bottom:auto"><div class="plabel">随时可派</div></div>`;
+    html += `<div class="pool" style="left:${poolBox.left}px;width:${poolBox.right-poolBox.left}px;top:${poolBox.top}px;height:${poolBox.bottom-poolBox.top}px;bottom:auto"><div class="plabel">待命 IDLE · 随时可派</div></div>`;
 
   html += nodes.map(n => {
     const c = COLOR[n.id] || (n.role === "worker" ? "#22d3ee" : "#94a3b8");
@@ -424,7 +428,7 @@ function renderNodes(){
     const showPill = n.role === "worker" || n.role === "orchestrator";
     const metrics = [];
     if(n.sessions) metrics.push(`${n.sessions} 会话`);
-    if(n.tokens_recent) metrics.push(`${fmtTok(n.tokens_recent)} tok`);
+    if(n.tokens_window) metrics.push(`${fmtTok(n.tokens_window)} tok`);
     if(n.cost_window) metrics.push(fmtCost(n.cost_window));
     if(n.role === "project"){ metrics.length = 0; metrics.push(`${n.sessions||0} 运行`); }
     const sub = n.stage ? `${n.stage}${n.note ? " · " + n.note : ""}` : (n.note || "");
@@ -432,6 +436,7 @@ function renderNodes(){
       data-node="${esc(n.id)}" style="left:${n.x}px;top:${n.y}px;width:${n.w}px;--glow:${c}66">
       <div class="accent" style="background:${c};top:${n.mini?8:10}px;bottom:${n.mini?8:12}px"></div>
       <div class="row1"><span class="name">${esc(n.label)}</span>
+        ${n.mini && n.cost_window ? `<span class="mini-cost">${fmtCost(n.cost_window)}</span>` : ""}
         ${showPill?`<span class="pill ${pillState[1]}">${pillState[0]}</span>`:""}</div>
       ${n.mini?"":`<div class="sub">${esc(sub)}</div>
       <div class="metrics">${(metrics.length?metrics:["—"]).map(m=>`<span>${esc(m)}</span>`).join("")}</div>
@@ -454,11 +459,12 @@ function renderNodes(){
 function renderGantt(W){
   const now = state.generated_at * 1000, span = windowMin*60*1000, from = now - span;
   const avail = Math.max(120, W - 36 - 58 - 12);
-  const lanes = ["dsh","pi","pi-rpc","codex","subagent"];
+  const lanes = [["dsh","DSH"],["pi","Pi"],["pi-rpc","Pi RPC"],["codex","Codex"],["subagent","子 agent"]];
   let html = `<div id="gantt"><div class="gt">最近 ${windowMin} 分钟 · 每条 = 一次派活（点条看详情）</div>`;
-  lanes.forEach(l => {
-    html += `<div class="grow"><div class="glabel">${l}</div>`;
+  lanes.forEach(([l, label]) => {
+    html += `<div class="grow"><div class="glabel">${label}</div>`;
     (state.timeline || []).filter(t => t.kind === l).forEach(t => {
+      if((t.end || 0) * 1000 < from) return;      // 窗口外的不画
       const s = Math.max(from, (t.start||0)*1000);
       const e2 = Math.min(now, Math.max((t.start||0)*1000 + 4000, (t.end||0)*1000));
       const left = 58 + (s - from)/span*avail;
@@ -528,8 +534,8 @@ function renderPanel(){
     b.innerHTML = `
       <div class="kv"><div class="k">忙碌度</div><div class="v">${Math.round((n.busy||0)*100)}%</div></div>
       <div class="kv"><div class="k">阶段</div><div class="v">${esc(n.stage||"—")}</div></div>
+      <div class="kv"><div class="k">窗口内</div><div class="v">${fmtTok(n.tokens_window)} tok · ${fmtCost(n.cost_window)}</div></div>
       <div class="kv"><div class="k">近 5 分钟</div><div class="v">${fmtTok(n.tokens_recent)} tok · ${fmtCost(n.cost_recent)}</div></div>
-      <div class="kv"><div class="k">窗口内花费</div><div class="v">${fmtCost(n.cost_window)}</div></div>
       <div class="kv"><div class="k">说明</div><div class="v">${esc(n.note||"")}</div></div>
       <div class="sect">相关连接 ${mine.length}</div>` +
       mine.map(e => `<div class="kv"><div class="k"><span class="chip">${stateName(e.state)}</span></div>

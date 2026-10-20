@@ -14,8 +14,12 @@
 
 import argparse
 from urllib.parse import urlencode
+import glob
+import hashlib
 import html
+import json
 import os
+import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -28,6 +32,65 @@ except Exception:
     L = None                 # 数据层不可用时由 slices_panel 降级为空状态
 
 TZ = timezone(timedelta(hours=8))
+
+# 数据源指纹（只 stat，不解析）：轮询时先比它，没变化就直接复用上次渲染结果。
+# 有变化才重新采集/渲染 —— 这是「只在变化时刷新」的服务端那一半。
+_SIG_PATTERNS = [
+    os.path.join(W.DSH_SESSIONS, "*", "session-*", "*.jsonl.zstd"),
+    os.path.join(W.PI_SESSIONS, "*", "*.jsonl"),
+    os.path.join(W.PI_RPC_LOGS, "pi-rpc-*.jsonl"),
+    os.path.join(W.CODEX_DIR, "**", "*.jsonl"),
+    os.path.join(W.HOME, ".hermes", "state", "pi-rpc", "*", "meta.json"),
+    W.HERMES_DB, W.HERMES_DB + "-wal",
+    os.path.join(W.HOME, ".hermes", "state", "agent_flow", "ledger.db"),
+    os.path.join(W.HOME, ".hermes", "state", "agent_flow", "ledger.db-wal"),
+]
+
+
+def src_sig():
+    items = []
+    for pat in _SIG_PATTERNS:
+        try:
+            paths = glob.glob(pat, recursive=True)
+        except Exception:
+            continue
+        for p in paths:
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            items.append((p, int(st.st_mtime), st.st_size))
+    items.sort()
+    return hashlib.sha1(repr(items).encode("utf-8")).hexdigest()
+
+
+# 片段标记：服务端把页面切成几个可独立替换的块，浏览器只换变化的那块，不整页重载。
+FRAG_RE = re.compile(r"<!--F:([a-z]+)-->(.*?)<!--F:/\1-->", re.S)
+
+# 每秒都在变的时钟/耗时不算「变化」：算哈希前先把它们抹平，
+# 否则每个块每 5 秒都会“变”，增量刷新就退化成整页重绘。
+# 展示值仍然是真实时间（客户端每秒自己走）。
+_STABLE_MASKS = [
+    (re.compile(r'(<div class="t px" id="clk">)[^<]*(</div>)'), r"\1<CLK>\2"),
+    (re.compile(r'(<span data-since="\d+">)[^<]*(</span>)'), r"\1<EL>\2"),
+]
+
+# 各块最短刷新间隔（秒）：图表/拓扑里在跑任务的长条会随时间变，没必要每 5 秒重画
+FRAG_HINTS = {"top": 5, "live": 5, "table": 10, "slices": 30, "network": 30, "charts": 30}
+
+
+def stable_text(body):
+    for rx, rep in _STABLE_MASKS:
+        body = rx.sub(rep, body)
+    return body
+
+
+def split_frags(doc):
+    frags, hashes = {}, {}
+    for name, body in FRAG_RE.findall(doc):
+        frags[name] = body
+        hashes[name] = hashlib.sha1(stable_text(body).encode("utf-8")).hexdigest()[:12]
+    return frags, hashes
 CACHE = os.path.join(os.path.expanduser("~"), ".hermes", "cache", "worker-dashboard.html")
 
 STATE_CLASS = {
@@ -1525,6 +1588,7 @@ SWAP_JS = """
     window.scrollTo(0, y);
     try{ history.pushState(null, '', url); }catch(e){}
     if(window.__netInit) window.__netInit();
+    if(window.__liveSeed) window.__liveSeed();
   }
   document.addEventListener('mouseover', function(ev){
     var a = ctlOf(ev.target);
@@ -1574,6 +1638,118 @@ MOBILE_JS = """
       try{ sessionStorage.setItem(KEY, String(Math.round(window.scrollY))); }catch(e){}
     }, 200);
   }, {passive:true});
+})();
+</script>
+"""
+
+# 增量刷新：不再整页重载（meta refresh 会把你拉回顶部），改成
+#   1) 每 N 秒问一次 ?frag=manifest（只回各块的哈希，很小）；
+#   2) 只有哈希变了的块才去取 HTML 并原地替换；
+#   3) 时钟与「在跑」耗时在本地每秒走，不靠刷新。
+# 交互中（滚动/触摸/锁定了拓扑节点）暂停轮询，避免打断阅读。
+LIVE_JS = """
+<script>
+(function(){
+  if(location.protocol === 'file:') return;
+  var POLL = (parseInt((document.body && document.body.getAttribute('data-poll')) || '0', 10) || 0) * 1000;
+  var cur = {}, ready = false, busyUntil = 0, hints = {}, lastSwap = {};
+  function params(){
+    return location.search.replace(/^\\?/, '').split('&').filter(function(s){
+      return s && s.indexOf('frag=') !== 0;
+    }).join('&');
+  }
+  function jget(u){
+    return fetch(u, {cache:'no-store'}).then(function(r){ return r.ok ? r.json() : null; });
+  }
+  function tget(u){
+    return fetch(u, {cache:'no-store'}).then(function(r){ return r.ok ? r.text() : ''; });
+  }
+  function marks(){
+    var m = {};
+    (function scan(node){
+      for(var n = node.firstChild; n; n = n.nextSibling){
+        if(n.nodeType === 8){
+          var t = (n.data || '').trim();
+          if(t.indexOf('F:/') === 0){ if(m[t.slice(3)]) m[t.slice(3)].end = n; }
+          else if(t.indexOf('F:') === 0){ m[t.slice(2)] = {start:n}; }
+        } else if(n.nodeType === 1 && n.tagName !== 'SCRIPT'){
+          scan(n);
+        }
+      }
+    })(document.body);
+    return m;
+  }
+  function swap(name, html){
+    if(!html) return;
+    var m = marks()[name];
+    if(!m || !m.start || !m.end) return;
+    var r = document.createRange();
+    r.setStartAfter(m.start);
+    r.setEndBefore(m.end);
+    r.deleteContents();
+    var tmp = document.createElement('div');
+    tmp.innerHTML = html;
+    var f = document.createDocumentFragment();
+    while(tmp.firstChild) f.appendChild(tmp.firstChild);
+    r.insertNode(f);
+    if(name === 'network' && window.__netInit) window.__netInit();
+    if(name === 'charts' || name === 'network') tick();
+  }
+  function seed(m){
+    cur = {};
+    if(m && m.frags){ for(var k in m.frags) cur[k] = m.frags[k]; }
+    if(m && m.hints){ hints = m.hints; }
+    ready = true;
+  }
+  function poll(){
+    if(!POLL || document.hidden) return;
+    if(Date.now() < busyUntil) return;                                  // 正在读/滑，不刷
+    if(document.querySelector('svg.net.hasfocus')) return;              // 拓扑被锁定
+    jget('?frag=manifest&' + params()).then(function(m){
+      if(!m || !m.frags) return;
+      if(!ready){ seed(m); return; }
+      if(m.hints) hints = m.hints;
+      for(var n in m.frags){
+        if(cur[n] === m.frags[n]) continue;
+        var gap = (hints[n] || (POLL / 1000)) * 1000;
+        if(lastSwap[n] && Date.now() - lastSwap[n] < gap) continue;      // 该块还没到刷新间隔
+        cur[n] = m.frags[n];
+        lastSwap[n] = Date.now();
+        (function(nm){
+          tget('?frag=' + nm + '&' + params()).then(function(h){ swap(nm, h); });
+        })(n);
+      }
+    }).catch(function(){});
+  }
+  function two(n){ return ('0' + n).slice(-2); }
+  function fmt(sec){
+    sec = Math.max(0, Math.floor(sec));
+    if(sec < 3600) return Math.floor(sec / 60) + ':' + two(sec % 60);
+    return Math.floor(sec / 3600) + ':' + two(Math.floor((sec % 3600) / 60)) + ':' + two(sec % 60);
+  }
+  function tick(){
+    var clk = document.getElementById('clk');
+    if(clk){
+      var d = new Date();
+      clk.textContent = two(d.getHours()) + ':' + two(d.getMinutes()) + ':' + two(d.getSeconds());
+    }
+    var now = Math.floor(Date.now() / 1000), els = document.querySelectorAll('[data-since]');
+    for(var i = 0; i < els.length; i++){
+      var s = parseInt(els[i].getAttribute('data-since'), 10);
+      if(!isNaN(s)) els[i].textContent = fmt(now - s);
+    }
+  }
+  window.__liveSeed = function(){ jget('?frag=manifest&' + params()).then(seed).catch(function(){}); };
+  window.__livePoll = poll;              // 便于自测/手动催一次
+  function touch(){ busyUntil = Date.now() + 6000; }
+  ['touchstart','pointerdown','wheel','scroll','keydown'].forEach(function(ev){
+    window.addEventListener(ev, touch, {passive:true});
+  });
+  setInterval(tick, 1000); tick();
+  if(POLL){
+    jget('?frag=manifest&' + params()).then(function(m){ seed(m); }).catch(function(){});
+    setInterval(poll, POLL);
+  }
 })();
 </script>
 """
@@ -1675,8 +1851,7 @@ def render_pixel(recs, refresh, lang="zh", days=14, rows=20, graph_n=12, procs=N
     head = f"""<!doctype html><html lang="{'zh-CN' if lang == 'zh' else 'en'}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>{T("board_title")} · PIXEL</title>
-{'<meta http-equiv="refresh" content="%d">' % refresh if refresh else ''}
-<style>{_font_css()}{CSS_PIXEL}{CTL_CSS}{NET_CSS}</style></head><body><div class="wrap">"""
+<style>{_font_css()}{CSS_PIXEL}{CTL_CSS}{NET_CSS}</style></head><body data-poll="{int(refresh or 0)}"><div class="wrap">"""
 
     top = f"""
 <div class="top">
@@ -1687,7 +1862,7 @@ def render_pixel(recs, refresh, lang="zh", days=14, rows=20, graph_n=12, procs=N
   </div>
   <div class="clock">
     <div class="lbl px">{T("local_time")}</div>
-    <div class="lcd"><div class="t px">{now:%H:%M:%S}</div></div>
+    <div class="lcd"><div class="t px" id="clk">{now:%H:%M:%S}</div></div>
     <div class="d px"><span>{now:%m-%d} {weekday_label(now.weekday())}</span><span>{T("sync")} <i class="blink"></i></span></div>
     <div class="lang-sw"><span class="lbl px" style="margin-right:6px">{T("lang")}</span>{_ctl_grp("lang", [("zh", T("lang_zh")), ("en", T("lang_en"))], lang)}</div>
   </div>
@@ -1714,7 +1889,12 @@ def render_pixel(recs, refresh, lang="zh", days=14, rows=20, graph_n=12, procs=N
   </div>
 </div>"""
 
-    charts = charts_html(recs, days, graph_n, procs, tdays, projs, scope, sdays)
+    last = chart_durations(recs) if procs is None else processes_panel(procs, recs)
+    charts = ('<div class="grid2">' + chart_daily(recs, days=days) +
+              chart_gantt(recs, days=tdays, scope=scope) +
+              chart_projects(recs, top=projs) + last + '</div>')
+    network = network_block(recs, graph_n)
+    slices = slices_panel(sdays)
 
     live = ""
     if running:
@@ -1733,7 +1913,7 @@ def render_pixel(recs, refresh, lang="zh", days=14, rows=20, graph_n=12, procs=N
             cards.append(f"""
 <div class="panel">
   <div class="panel-h"><i class="sq"></i><h2 class="px">{T("p_now")}</h2>{nth}
-    <div class="right"><span class='tag live px' title='{T("elapsed")} {dur_text(r)}'>ELAPSED {dur_lcd(r)}</span>
+    <div class="right"><span class='tag live px' title='{T("elapsed")} {dur_text(r)}'>ELAPSED <span data-since="{int(r.get('start') or 0)}">{dur_lcd(r)}</span></span>
     <span class="tag px">{human_tok(r.get('tokens')).upper()} TOK</span>
     <span class="tag px" title="{e(cost_tip(r))}">{cost_text(r)}</span></div></div>
   <div class="live">
@@ -1760,7 +1940,7 @@ def render_pixel(recs, refresh, lang="zh", days=14, rows=20, graph_n=12, procs=N
   <td class="num"><div class="tokcell"><span class="toknum">{human_tok(r.get('tokens')).upper()}</span>
       <span class="seg">{seg_bar(pct)}</span></div></td>
   <td class="num money" title="{e(cost_tip(r))}">{cost_text(r)}</td>
-  <td class="num t">{dur_lcd(r)}</td>
+  <td class="num t">{f'<span data-since="{int(r.get("start") or 0)}">{dur_lcd(r)}</span>' if r["state"] == "RUNNING" else dur_lcd(r)}</td>
 </tr>""")
 
     table = f"""
@@ -1772,14 +1952,23 @@ def render_pixel(recs, refresh, lang="zh", days=14, rows=20, graph_n=12, procs=N
     <thead><tr><th>{T("th_time")}</th><th>{T("th_worker")}</th><th>{T("th_project")}</th><th>{T("th_task")}</th><th>{T("th_state")}</th><th>{T("th_tokens")}</th><th>{T("th_cost")}</th><th title="{T('dur_tip')}">{T("th_dur")}</th></tr></thead>
     <tbody>{''.join(rows) if rows else f'<tr><td colspan="8" class="empty">{T("empty_records")}</td></tr>'}</tbody>
   </table></div>
-</div>
+</div>"""
 
+    tail = f"""
 <div class="foot">
   <span class="px">SRC: ~/.dsh/sessions · ~/.pi/agent/sessions · ~/.hermes/logs/pi-rpc-*.jsonl</span>
   <span class="px">{T("foot_detail")}</span>
 </div>
-</div>{NET_JS}{SWAP_JS}{MOBILE_JS}</body></html>"""
-    return head + top + charts + live + table
+</div>{NET_JS}{SWAP_JS}{MOBILE_JS}{LIVE_JS}</body></html>"""
+    # 六个可独立替换的块：顶部 KPI / 图表 / 拓扑 / 切片 / 正在运行 / 运行流水。
+    # 浏览器只替换哈希变化的块 —— 不整页重载，滚动位置不动。
+    return (head +
+            "<!--F:top-->" + top + "<!--F:/top-->" +
+            "<!--F:charts-->" + charts + "<!--F:/charts-->" +
+            "<!--F:network-->" + network + "<!--F:/network-->" +
+            "<!--F:slices-->" + slices + "<!--F:/slices-->" +
+            "<!--F:live-->" + live + "<!--F:/live-->" +
+            "<!--F:table-->" + table + "<!--F:/table-->" + tail)
 
 
 def demo_recs(lang="zh"):
@@ -1884,26 +2073,40 @@ def demo_procs(lang="zh"):
 
 def serve(port, style, refresh, demo, lang="zh", days=14, rows=20, graph_n=12,
           tdays=7, projs=6, scope="all", sdays=7, host="127.0.0.1"):
-    """小 HTTP 服务：每次请求重新采集并渲染；页面自带 meta refresh 自动刷新。
+    """小 HTTP 服务：按需渲染，页面靠 JS 增量刷新（不是整页重载）。
 
     查询参数：?lang=zh|en &days=7|14|30 &rows=20|50|100 &graph=6|12|24 &scope=all|dg
              &tdays=7|14|30 &projs=4|6|10 &sdays=7|14|30
+    增量刷新：?frag=manifest 回各块哈希；?frag=<块名> 回那一块的 HTML。
     """
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from urllib.parse import urlparse, parse_qs
     memo = {}
     recs_memo = {"t": 0.0, "recs": None}
+    procs_memo = {"t": 0.0, "procs": [], "pid": None}
 
-    def get_recs(lang_):
-        """采集结果短时复用：切范围时只重渲染（~30ms），不再重解全部会话（~1.3s）。"""
+    def get_recs(lang_, force=False):
+        """采集结果短时复用：切范围时只重渲染（~30ms），不再重解全部会话（~1.3s）。
+        force=True 时绕过复用（数据源指纹变了，必须重新采集）。"""
         if demo:
             return demo_recs(lang_)
         now = time.time()
-        if recs_memo["recs"] is not None and now - recs_memo["t"] < 4.0:
+        if not force and recs_memo["recs"] is not None and now - recs_memo["t"] < 4.0:
             return recs_memo["recs"]
         recs = W.collect()
         recs_memo.update({"t": time.time(), "recs": recs})
         return recs
+
+    def get_procs(lang_):
+        """进程列表 15s 复用：ps 扫描约 0.3s，比整页渲染还贵。"""
+        if demo:
+            return demo_procs(lang_)
+        now = time.time()
+        if procs_memo["pid"] == os.getpid() and now - procs_memo["t"] < 15.0:
+            return procs_memo["procs"]
+        procs = W.scan_processes()
+        procs_memo.update({"t": time.time(), "procs": procs, "pid": os.getpid()})
+        return procs
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -1917,6 +2120,8 @@ def serve(port, style, refresh, demo, lang="zh", days=14, rows=20, graph_n=12,
                 v = (q.get(key) or [str(default)])[0]
                 return v if v in [str(a) for a in allowed] else str(default)
 
+            want_frag = (q.get("frag") or [""])[0]
+            want_static = "static=1" in self.path          # 截图/快照：不轮询
             want_lang = pick("lang", ["zh", "en"], lang)
             want_days = int(pick("days", [7, 14, 30], days))
             want_rows = int(pick("rows", [20, 50, 100], rows))
@@ -1927,26 +2132,52 @@ def serve(port, style, refresh, demo, lang="zh", days=14, rows=20, graph_n=12,
             want_sdays = int(pick("sdays", [7, 14, 30], sdays))
             want_style = "clean" if "style=clean" in self.path else style
             key = (want_style, want_lang, want_days, want_rows, want_graph, want_tdays, want_projs,
-                   want_scope, want_sdays)
+                   want_scope, want_sdays, want_static)
+
+            # 「只有变化才刷新」：先比数据源指纹（只 stat），没变就复用上次渲染结果。
+            sig = "demo" if demo else src_sig()
             ent = memo.get(key)
-            if not ent or time.time() - ent[0] > 2:
-                recs = get_recs(want_lang)
-                procs = demo_procs(want_lang) if demo else W.scan_processes()
+            stale = (ent is None or ent["sig"] != sig or
+                     time.time() - ent["ts"] > 30)          # 30s 兜底：进程增减不一定写文件
+            if stale:
+                recs = get_recs(want_lang, force=bool(ent and ent["sig"] != sig))
+                procs = get_procs(want_lang)
                 cur = {"lang": want_lang, "days": want_days, "rows": want_rows, "graph": want_graph,
                        "tdays": want_tdays, "projs": want_projs, "scope": want_scope,
                        "sdays": want_sdays}
                 if want_style == "clean":
-                    doc = render(recs, refresh)
+                    doc = render(recs, 0 if want_static else refresh)
                 else:
-                    doc = render_pixel(recs, refresh, lang=want_lang, days=want_days,
+                    doc = render_pixel(recs, 0 if want_static else refresh, lang=want_lang, days=want_days,
                                        rows=want_rows, graph_n=want_graph, procs=procs, cur=cur,
                                        tdays=want_tdays, projs=want_projs, scope=want_scope,
                                        sdays=want_sdays)
-                ent = (time.time(), doc.encode("utf-8"))
+                frags, hashes = split_frags(doc)
+                v = hashlib.sha1("".join(hashes[k] for k in sorted(hashes)).encode()).hexdigest()[:12] \
+                    if hashes else hashlib.sha1(doc.encode("utf-8")).hexdigest()[:12]
+                ent = {"ts": time.time(), "sig": sig, "doc": doc.encode("utf-8"),
+                       "frags": frags, "hashes": hashes, "v": v}
                 memo[key] = ent
-            body = ent[1]
+
+            if want_frag == "manifest":
+                body = json.dumps({"v": ent["v"], "frags": ent["hashes"], "poll": refresh,
+                                   "hints": FRAG_HINTS}, ensure_ascii=False).encode("utf-8")
+                ctype = "application/json; charset=utf-8"
+            elif want_frag:
+                frag = ent["frags"].get(want_frag)
+                if frag is None:
+                    self.send_response(404)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                body = frag.encode("utf-8")
+                ctype = "text/html; charset=utf-8"
+            else:
+                body = ent["doc"]
+                ctype = "text/html; charset=utf-8"
+
             self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Type", ctype)
             self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()

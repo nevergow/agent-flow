@@ -202,13 +202,49 @@ code.k{font:11.5px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--ink-3
 .empty{padding:26px 20px;color:var(--ink-3);font-size:13px}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-bottom:18px}
 .grid1{margin-bottom:18px}
-.chart{padding:12px 14px 10px}
+/* 表格/图表一律在容器内部横滚：整页被撑宽会让手机浏览器把布局视口放大到 ~750px，
+   页面整体缩小、右侧像被裁掉。这条必须无条件生效——它得在首次布局前就挡住表格溢出，
+   否则写在媒体查询里永远来不及（视口已经被撑大了）。 */
+.tscroll{overflow-x:auto;overscroll-behavior-x:contain}
+.grid2>*,.cards>*{min-width:0}
+.chart{padding:12px 14px 10px;overflow-x:auto;overscroll-behavior-x:contain}
 .chart svg{display:block;width:100%;height:auto}
 .legend{display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:11.5px;color:var(--ink-2);padding:9px 18px 0}
 .legend span{display:inline-flex;align-items:center;gap:5px}
 .legend i{width:9px;height:9px;display:inline-block;border-radius:2px}
 @media (max-width:900px){.grid2{grid-template-columns:1fr}}
 @media (max-width:860px){.cards{grid-template-columns:repeat(2,1fr)}body{padding:22px 16px 32px}h1{font-size:23px}.task{max-width:180px}}
+/* 手机竖屏：表格/图表在面板内部横滚，页面本身绝不横向溢出
+   （整页被撑宽会让移动浏览器把布局视口放大到 ~750px，所有字一起变小） */
+@media (max-width:700px){
+  body{padding:16px 12px 30px}
+  .head{flex-direction:column;align-items:flex-start;gap:10px;margin-bottom:16px}
+  h1{font-size:22px}
+  .sub{font-size:12.5px}
+  .stamp{text-align:left;white-space:normal}
+  .cards{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+  .card{padding:12px 13px 13px;border-radius:12px}
+  .card .v{font-size:21px}
+  .panel{border-radius:14px}
+  .panel+.panel{margin-top:14px}
+  .panel-h{padding:12px 13px;gap:8px;flex-wrap:wrap}
+  .grid2,.grid1{gap:14px;margin:14px 0}
+  .live{padding:14px 13px 14px}
+  .live-title{font-size:16px}
+  .timeline li{grid-template-columns:48px 62px minmax(0,1fr);gap:7px;font-size:12px}
+  .tscroll{overflow-x:auto;-webkit-overflow-scrolling:touch;overscroll-behavior-x:contain}
+  .tscroll table{min-width:720px}
+  .tscroll table.slices{min-width:640px}
+  .chart{padding:9px 9px 7px;overflow-x:auto;-webkit-overflow-scrolling:touch;overscroll-behavior-x:contain;
+    background-image:radial-gradient(farthest-side at 100% 50%,rgba(20,22,28,.26),rgba(20,22,28,0));
+    background-position:right center;background-size:16px 100%;background-repeat:no-repeat}
+  .chart svg{min-width:500px}
+  .chart svg.net{min-width:760px}
+  .legend{font-size:10.5px;gap:10px;padding:8px 12px 0}
+  .ctl{gap:8px}
+  .pctl a,.ctl a{padding:6px 8px}
+  .foot{font-size:10.5px;gap:8px}
+}
 """
 
 
@@ -225,7 +261,7 @@ def render(recs, refresh):
 
     parts = []
     parts.append(f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>执行者看板 · DSH / Pi</title>
 {'<meta http-equiv="refresh" content="%d">' % refresh if refresh else ''}
 <style>{CSS}</style></head><body><div class="wrap">""")
@@ -298,17 +334,17 @@ def render(recs, refresh):
     parts.append(f"""
 <div class="panel">
   <div class="panel-h"><h2>最近运行</h2><span class="hint">共 {len(recs)} 条 · 显示最近 26 条</span></div>
-  <table>
+  <div class="tscroll"><table>
     <colgroup><col style="width:90px"><col style="width:86px"><col style="width:148px"><col><col style="width:90px"><col style="width:152px"><col style="width:86px"><col style="width:78px"></colgroup>
     <thead><tr><th>时间</th><th>执行者</th><th>项目</th><th>任务</th><th>状态</th><th>Tokens</th><th>花费</th><th>耗时</th></tr></thead>
-  <tbody>{''.join(rows) if rows else '<tr><td colspan="8" class="empty">还没有记录</td></tr>'}</tbody></table>
+  <tbody>{''.join(rows) if rows else '<tr><td colspan="8" class="empty">还没有记录</td></tr>'}</tbody></table></div>
 </div>
 
 <div class="foot">
   <span>数据源：~/.dsh/sessions（zstd JSONL 事件流）· ~/.pi/agent/sessions · ~/.hermes/logs/pi-rpc-*.jsonl</span>
   <span>明细 <code class="k">worker_runs.py show &lt;KEY&gt;</code> · Token 条按最大值归一 · ¥ 为按 deepseek-flash 官方价估算，$ 为 pi 自报</span>
 </div>
-</div></body></html>""")
+</div>{MOBILE_JS}</body></html>""")
     return "".join(parts)
 
 
@@ -466,7 +502,11 @@ tbody tr:hover{background:#FBF7EA}
 .money{font-family:'PS2P',monospace;font-size:8.5px;color:var(--ink)}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:22px;margin:22px 0}
 .grid1{margin:22px 0}
-.chart{padding:12px 14px 10px}
+/* 表格/图表必须在容器内部横滚（无条件生效）：整页被撑宽时移动浏览器会把布局视口放大到
+   ~750px，页面整体缩小、字全变小；写在媒体查询里来不及，因为视口那时已经被撑大了。 */
+.tscroll{overflow-x:auto;overscroll-behavior-x:contain}
+.grid2>*,.stats>*{min-width:0}
+.chart{padding:12px 14px 10px;overflow-x:auto;overscroll-behavior-x:contain}
 .chart svg{display:block;width:100%;height:auto}
 .legend{display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:10px;color:var(--ink-2);padding:9px 16px 0}
 .legend span{display:inline-flex;align-items:center;gap:5px}
@@ -479,6 +519,126 @@ table.slices tfoot td{padding:9px 13px;color:var(--ink-3);font-size:10.5px;
   border-top:1.5px dashed var(--hair);font-variant-numeric:tabular-nums}
 @media (max-width:860px){.grid2{grid-template-columns:1fr}.stats{grid-template-columns:repeat(2,1fr)}body{padding:22px 14px 30px}
   h1{font-size:23px}.top{flex-direction:column}.clock{width:100%}.timeline li{grid-template-columns:54px 76px minmax(0,1fr)}}
+
+/* ---- 手机竖屏（≤700px）：单列 + 面板内横滚 + 触控尺寸放大 ----
+   表格/图表必须在容器内部横滚：整页被撑宽时，移动浏览器会把布局视口放大到 ~750px，
+   页面整体缩小、字全变小，而且右侧内容看起来被裁掉。 */
+@media (max-width:700px){
+  body{padding:16px 12px calc(28px + env(safe-area-inset-bottom))}
+  .top{gap:13px;margin-bottom:16px}
+  .kicker{font-size:8px;margin-bottom:10px}
+  h1{font-size:24px;margin-bottom:10px}
+  h1 .rule{width:104px;height:3px;margin-top:9px}
+  .sub{font-size:12px;line-height:1.5}
+  .clock{padding:8px 10px 9px;box-shadow:3px 3px 0 var(--line)}
+  .clock .lcd{padding:8px 9px 6px}
+  .clock .t{font-size:16px}
+
+  .stats{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-bottom:14px}
+  .stat{padding:10px 11px 12px;box-shadow:3px 3px 0 var(--line)}
+  .stat .k{font-size:7.5px}
+  .stat .v{font-size:18px}
+  .stat .lcd{margin:9px 0 8px;padding:7px 8px 5px}
+  .stat .c{font-size:10.5px;line-height:1.4}
+  .stat .c2{white-space:normal;flex-wrap:wrap;gap:1px 8px;font-size:9px;letter-spacing:0}
+  .stat .c2.dim{margin-top:3px}
+
+  .panel+.panel{margin-top:14px}
+  .grid2,.grid1{gap:14px;margin:14px 0}
+  .panel-h{padding:9px 11px;gap:7px;flex-wrap:wrap}
+  .panel-h h2{font-size:8px}
+  .panel-h .right{margin-left:auto;flex-wrap:wrap;gap:6px;justify-content:flex-end;min-width:0}
+  .tag{font-size:7px;padding:4px 6px 3px}
+
+  .live{padding:12px 13px 14px}
+  .live .task{font-size:16px;line-height:1.35;margin-bottom:8px}
+  .live .meta{font-size:10.5px;gap:7px;margin-bottom:12px}
+  .live .meta .id{font-size:7.5px;word-break:break-all}
+  .timeline li{grid-template-columns:50px 60px minmax(0,1fr);gap:7px;font-size:11.5px;padding:8px 0}
+  .timeline time{font-size:8px}
+  .tool{font-size:7px;padding:4px 3px 3px}
+  .arg{font-size:11px}
+
+  .tscroll{overflow-x:auto;-webkit-overflow-scrolling:touch;overscroll-behavior-x:contain}
+
+  /* 三张表在手机上重排成卡片：隐藏表头，一行拆成三行网格。
+     8 列挤在 362px 里必然要横滚，卡片式更好读，也省掉"右边还有内容"的猜谜。 */
+  table.hist,table.proc,table.slices{display:block;width:100%}
+  table.hist colgroup,table.proc colgroup,table.slices colgroup{display:none}
+  table.hist thead,table.proc thead,table.slices thead{display:none}
+  table.hist tbody,table.proc tbody,table.slices tbody{display:block}
+  table.hist tbody tr,table.proc tbody tr{display:grid;gap:6px 11px;align-items:center;
+    padding:10px 12px;border-bottom:1.5px dashed var(--hair)}
+  table.hist tbody tr:last-child,table.proc tbody tr:last-child{border-bottom:0}
+  table.hist tbody td,table.proc tbody td,table.slices tbody td{padding:0;border:0;display:block;min-width:0}
+  table.hist tbody tr{grid-template-columns:minmax(0,1fr) auto auto auto;
+    grid-template-areas:"time worker state state" "task task task task" "proj toks cost dur"}
+  table.hist tbody .seg{display:none}
+  table.hist tbody td:nth-child(1){grid-area:time}
+  table.hist tbody td:nth-child(2){grid-area:worker}
+  table.hist tbody td:nth-child(3){grid-area:proj}
+  table.hist tbody td:nth-child(4){grid-area:task}
+  table.hist tbody td:nth-child(5){grid-area:state;justify-self:end}
+  table.hist tbody td:nth-child(6){grid-area:toks;justify-self:end}
+  table.hist tbody td:nth-child(7){grid-area:cost;justify-self:end}
+  table.hist tbody td:nth-child(8){grid-area:dur;justify-self:end}
+  table.hist tbody .taskcell{white-space:normal;overflow:hidden;display:-webkit-box;
+    -webkit-line-clamp:2;-webkit-box-orient:vertical;font-size:12px;line-height:1.35}
+  table.hist tbody td:nth-child(6):before{content:"TOK ";font-family:'PS2P',monospace;font-size:7px;color:var(--ink-3)}
+  table.hist tbody td:nth-child(8):before{content:"DUR ";font-family:'PS2P',monospace;font-size:7px;color:var(--ink-3)}
+
+  table.proc tbody tr{grid-template-columns:auto auto minmax(0,1fr);
+    grid-template-areas:"pid agent elapsed" "proj proj cpu" "task task task"}
+  table.proc tbody td:nth-child(1){grid-area:pid}
+  table.proc tbody td:nth-child(2){grid-area:agent}
+  table.proc tbody td:nth-child(3){grid-area:proj}
+  table.proc tbody td:nth-child(4){grid-area:elapsed;justify-self:start}
+  table.proc tbody td:nth-child(5){grid-area:cpu;justify-self:end}
+  table.proc tbody td:nth-child(6){grid-area:task}
+  table.proc tbody td:nth-child(4):before{content:"DUR ";font-family:'PS2P',monospace;font-size:7px;color:var(--ink-3)}
+  table.proc tbody td:nth-child(5):before{content:"CPU ";font-family:'PS2P',monospace;font-size:7px;color:var(--ink-3)}
+  table.proc tbody .taskcell{white-space:normal;font-size:11.5px;line-height:1.35}
+
+  table.slices tbody tr.sl{display:grid;gap:5px 9px;align-items:center;
+    padding:10px 12px;border-bottom:1.5px dashed var(--hair);
+    grid-template-columns:auto minmax(0,1fr) auto;
+    grid-template-areas:"state worker updated" "goal goal goal" "att verdict runs"}
+  table.slices tbody tr.sl td:nth-child(1){grid-area:state}
+  table.slices tbody tr.sl td:nth-child(2){grid-area:goal}
+  table.slices tbody tr.sl td:nth-child(3){grid-area:worker;justify-self:start}
+  table.slices tbody tr.sl td:nth-child(4){grid-area:att}
+  table.slices tbody tr.sl td:nth-child(5){grid-area:verdict}
+  table.slices tbody tr.sl td:nth-child(6){grid-area:runs;justify-self:end}
+  table.slices tbody tr.sl td:nth-child(7){grid-area:updated;justify-self:end}
+  table.slices tbody tr.sl td:nth-child(4):before{content:"ATT ";font-family:'PS2P',monospace;font-size:7px;color:var(--ink-3)}
+  table.slices tbody tr.sl td:nth-child(6):before{content:"RUN ";font-family:'PS2P',monospace;font-size:7px;color:var(--ink-3)}
+  table.slices tbody tr.sl .taskcell{white-space:normal;overflow:visible;font-size:11.5px;line-height:1.35}
+  table.slices tbody tr.req{display:block;padding:9px 12px;border-bottom:1.5px solid var(--hair)}
+  table.slices tbody tr.req td{display:block;padding:0;border:0;font-size:11px;line-height:1.35}
+  table.slices tfoot{display:block}
+  table.slices tfoot td{display:block;padding:9px 12px;border-top:0}
+
+  .chart{padding:9px 9px 7px;overflow-x:auto;-webkit-overflow-scrolling:touch;overscroll-behavior-x:contain;
+    background-image:radial-gradient(farthest-side at 100% 50%,rgba(20,21,25,.38),rgba(20,21,25,0));
+    background-position:right center;background-size:16px 100%;background-repeat:no-repeat}
+  .chart svg{min-width:520px}
+  .chart svg.net{min-width:760px}
+  .legend{font-size:9px;gap:10px;padding:8px 11px 0}
+
+  .pctl{gap:5px}
+  .pctl a{min-height:30px;display:inline-flex;align-items:center;padding:0 9px;font-size:8px}
+  .ctl{gap:8px;font-size:7.5px}
+  .ctl a{padding:8px 9px;font-size:8px;min-height:30px;display:inline-flex;align-items:center}
+  .foot{font-size:9px;gap:8px;line-height:1.5}
+  .foot .px{overflow-wrap:anywhere}
+  .empty{padding:18px 12px;font-size:11.5px}
+}
+
+@media (max-width:380px){
+  .stats{grid-template-columns:minmax(0,1fr)}
+  .timeline li{grid-template-columns:46px 54px minmax(0,1fr)}
+  .chart svg{min-width:460px}
+}
 """
 
 PIXEL_STATE = {"RUNNING": "p-run", "done": "p-ok", "interrupted": "p-warn",
@@ -1094,12 +1254,12 @@ def slices_panel(sdays=7):
   <div class="panel-h"><i class="sq" style="background:var(--amber);animation:none"></i>
     <h2 class="px">{T("p_slices")}</h2>
     <div class="right">{_ctl_grp("sdays", [(7, "7D"), (14, "14D"), (30, "30D")], sdays)}<span class="tag px">{_slices_tag(total, verdict, pass_pct, avg)}</span></div></div>
-  <table class="slices">
+  <div class="tscroll"><table class="slices">
     <colgroup><col style="width:84px"><col><col style="width:96px"><col style="width:56px"><col style="width:64px"><col style="width:56px"><col style="width:96px"></colgroup>
     <thead><tr><th>{T("th_state")}</th><th>{T("th_slice")}</th><th>{T("th_worker")}</th><th class="num">{T("th_attempt")}</th><th>{T("th_verdict")}</th><th class="num">{T("th_runs")}</th><th>{T("th_updated")}</th></tr></thead>
     <tbody>{body_html}</tbody>
     <tfoot><tr><td colspan="7">{T("slices_show", shown, total)}</td></tr></tfoot>
-  </table>
+  </table></div>
 </div>"""
     except Exception:
         return _slices_empty_html(sdays)
@@ -1134,7 +1294,7 @@ I18N = {
         "cost_upstream": "上游自报 $%.4f",
         "cost_today_tip": "今日 0:00 起 · 估算合计 ¥%.2f（%s）· Pi 组含 Pi/Pi·rpc/Codex，Hermes 组含主循环与子 agent · %s · 只是按 token 单价推算，不是账单实付",
         "active_tip": "活跃 %s（%d 段）", "lg_done": "完成", "lg_halt": "中断", "lg_fail": "失败",
-        "dur_x": "x=开始时间（虚线=换日）", "bus_hover": "悬停节点只看它的连接",
+        "dur_x": "x=开始时间（虚线=换日）", "bus_hover": "点/悬停节点只看它的连接",
         "elapsed": "已运行", "lang_zh": "中文", "lang_en": "EN",
         "k_cost_est": "官价估算·非实付", "sc_all": "全部", "sc_dg": "只看派活",
         "tl_lanes": "%d 条会话 · 最多 %d 道", "tl_segs": "%d 段", "p_now_runs": "%d 条在窗内",
@@ -1185,7 +1345,7 @@ I18N = {
         "cost_upstream": "upstream $%.4f",
         "cost_today_tip": "since 00:00 · est. total ¥%.2f (%s) · Pi group = Pi/Pi·rpc/Codex, Hermes group = main loop + sub-agents · %s · derived from token prices, not an invoice",
         "active_tip": "active %s (%d seg)", "lg_done": "DONE", "lg_halt": "HALT", "lg_fail": "FAIL",
-        "dur_x": "x = start time (dashed = new day)", "bus_hover": "hover a node to keep only its links",
+        "dur_x": "x = start time (dashed = new day)", "bus_hover": "tap/hover a node to keep only its links",
         "elapsed": "ELAPSED", "lang_zh": "ZH", "lang_en": "EN",
         "k_cost_est": "est. · not billed", "sc_all": "ALL", "sc_dg": "DELEGATED",
         "tl_lanes": "%d sessions · up to %d lanes", "tl_segs": "%d seg", "p_now_runs": "%d in view",
@@ -1397,6 +1557,27 @@ SWAP_JS = """
 </script>
 """
 
+# 手机端：meta refresh 每 N 秒整页重载会把页面弹回顶部；按会话记住滚动位置，重载后再复位
+MOBILE_JS = """
+<script>
+(function(){
+  if(location.protocol === 'file:') return;
+  var KEY = 'wd_scroll_y', y = 0;
+  try{ y = parseInt(sessionStorage.getItem(KEY) || '0', 10) || 0; }catch(e){}
+  function restore(){ if(y > 4) window.scrollTo(0, y); }
+  if(document.readyState === 'complete'){ restore(); }
+  else { window.addEventListener('load', function(){ setTimeout(restore, 0); }); }
+  var t = null;
+  window.addEventListener('scroll', function(){
+    clearTimeout(t);
+    t = setTimeout(function(){
+      try{ sessionStorage.setItem(KEY, String(Math.round(window.scrollY))); }catch(e){}
+    }, 200);
+  }, {passive:true});
+})();
+</script>
+"""
+
 
 
 CUR = {}
@@ -1455,11 +1636,11 @@ def processes_panel(procs, recs):
 <div class="panel">
   <div class="panel-h"><i class="sq" style="background:var(--violet);animation:none"></i><h2 class="px">{T("p_proc")}</h2>
     <div class="right"><span class="tag px">{T("proc_live", len(procs))}</span></div></div>
-  <table>
+  <div class="tscroll"><table class="proc">
     <colgroup><col style="width:76px"><col style="width:74px"><col style="width:132px"><col style="width:74px"><col style="width:56px"><col></colgroup>
     <thead><tr><th>{T("th_pid")}</th><th>{T("th_agent")}</th><th>{T("th_proj")}</th><th>{T("th_elapsed")}</th><th>{T("th_cpu")}</th><th>{T("th_task")}</th></tr></thead>
     <tbody>{body}</tbody>
-  </table>
+  </table></div>
 </div>"""
 
 
@@ -1492,7 +1673,7 @@ def render_pixel(recs, refresh, lang="zh", days=14, rows=20, graph_n=12, procs=N
     maxtok = max([r.get("tokens") or 0 for r in recs] + [1])
 
     head = f"""<!doctype html><html lang="{'zh-CN' if lang == 'zh' else 'en'}"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>{T("board_title")} · PIXEL</title>
 {'<meta http-equiv="refresh" content="%d">' % refresh if refresh else ''}
 <style>{_font_css()}{CSS_PIXEL}{CTL_CSS}{NET_CSS}</style></head><body><div class="wrap">"""
@@ -1586,18 +1767,18 @@ def render_pixel(recs, refresh, lang="zh", days=14, rows=20, graph_n=12, procs=N
 <div class="panel">
   <div class="panel-h"><i class="sq" style="background:var(--violet);animation:none"></i><h2 class="px">{T("p_hist")}</h2>
     <div class="right">{_ctl_grp("rows", [(20, "20"), (50, "50"), (100, "100")], row_limit)}<span class="tag px">{T("records", len(recs))}</span></div></div>
-  <table>
+  <div class="tscroll"><table class="hist">
     <colgroup><col style="width:104px"><col style="width:76px"><col style="width:146px"><col><col style="width:92px"><col style="width:150px"><col style="width:84px"><col style="width:82px"></colgroup>
     <thead><tr><th>{T("th_time")}</th><th>{T("th_worker")}</th><th>{T("th_project")}</th><th>{T("th_task")}</th><th>{T("th_state")}</th><th>{T("th_tokens")}</th><th>{T("th_cost")}</th><th title="{T('dur_tip')}">{T("th_dur")}</th></tr></thead>
     <tbody>{''.join(rows) if rows else f'<tr><td colspan="8" class="empty">{T("empty_records")}</td></tr>'}</tbody>
-  </table>
+  </table></div>
 </div>
 
 <div class="foot">
   <span class="px">SRC: ~/.dsh/sessions · ~/.pi/agent/sessions · ~/.hermes/logs/pi-rpc-*.jsonl</span>
   <span class="px">{T("foot_detail")}</span>
 </div>
-</div>{NET_JS}{SWAP_JS}</body></html>"""
+</div>{NET_JS}{SWAP_JS}{MOBILE_JS}</body></html>"""
     return head + top + charts + live + table
 
 

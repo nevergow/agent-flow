@@ -149,6 +149,44 @@ def _one_line(s, n):
     return (s[:n] + "…") if len(s) > n else s
 
 
+# 会话标题：Hermes 各来源的 display_name 都是空的，于是拓扑/流水里全显示
+# "tui session"、"cron session"——看不出这活儿干的是什么。改成取会话里
+# 首条（已在跑的则取最新一条）user 消息当标题。有 idx_messages_session 索引，单条 0ms。
+_CRON_NAMES = {"key": None, "map": {}}
+CRON_JOBS = os.path.join(HOME, ".hermes", "cron", "jobs.json")
+
+
+def cron_job_names():
+    """cron 会话的标题用任务名（jobs.json 很小，按 mtime 缓存）。"""
+    try:
+        st = os.stat(CRON_JOBS)
+    except OSError:
+        return {}
+    key = (st.st_mtime, st.st_size)
+    if _CRON_NAMES["key"] == key:
+        return _CRON_NAMES["map"]
+    names = {}
+    try:
+        with open(CRON_JOBS) as f:
+            for j in (json.load(f) or {}).get("jobs") or []:
+                if j.get("id") and j.get("name"):
+                    names[j["id"]] = j["name"]
+    except Exception:
+        names = {}
+    _CRON_NAMES.update({"key": key, "map": names})
+    return names
+
+
+def _title_of(text, n=60):
+    """人看得懂的会话标题：剥掉 cron 注入的 [IMPORTANT: ...] 提示块，取第一行有效内容。"""
+    s = (text or "").strip()
+    if s.startswith("[IMPORTANT:"):
+        parts = s.split("\n\n", 1)
+        s = parts[1] if len(parts) > 1 else ""
+    first = next((ln.strip() for ln in s.splitlines() if ln.strip()), "")
+    return _one_line(first, n)
+
+
 def _ms(v):
     """createdAt / time 可能是 epoch ms 或 ISO 串。"""
     if v is None:
@@ -769,6 +807,23 @@ def scan_hermes(days=7, limit=40):
                 mt.setdefault(m["session_id"], []).append(m["timestamp"])
         except Exception:
             mt = {}
+        # 会话标题：Hermes 各来源的 display_name 都是空的，于是拓扑/流水里全显示
+        # "tui session"、"cron session"——看不出这活儿干的是什么。改成取会话里
+        # 首条（已在跑的则取最新一条）user 消息当标题。有 idx_messages_session 索引，单条 0ms。
+        titles = {}
+        try:
+            q = ("select content from messages where session_id = ? and role = 'user' "
+                 "order by timestamp %s limit 1")
+            for r in rows:
+                sid = r["id"]
+                first = con.execute(q % "asc", (sid,)).fetchone()
+                lastu = con.execute(q % "desc", (sid,)).fetchone()
+                titles[sid] = (
+                    _title_of(first["content"], 60) if first and first["content"] else "",
+                    _title_of(lastu["content"], 60) if lastu and lastu["content"] else "",
+                )
+        except Exception:
+            titles = {}
         con.close()
     except Exception:
         return out
@@ -777,7 +832,13 @@ def scan_hermes(days=7, limit=40):
         last = r["last_msg"] or r["started_at"] or 0
         live = r["ended_at"] is None and (now - last) < 180
         state = "RUNNING" if live else ("interrupted" if (r["end_reason"] or "").startswith(("interrupt", "abort")) else "done")
-        label = (r["display_name"] or "").strip() or f'{r["source"]} session'
+        first_t, last_t = titles.get(r["id"], ("", ""))
+        label = ((r["display_name"] or "").strip()
+                 or (last_t if state == "RUNNING" else first_t) or last_t or first_t
+                 or f'{r["source"]} session')
+        if r["source"] == "cron":
+            m = re.match(r"cron_([0-9a-f]{12})", r["id"] or "")
+            label = (cron_job_names().get(m.group(1)) if m else None) or label
         out.append({
             "worker": "Hermes", "kind": "hermes", "key": r["id"], "path": "",
             "state": state, "tokens": int(r["tin"]) + int(r["tout"]) + int(r["tcache"]),

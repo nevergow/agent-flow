@@ -574,7 +574,7 @@ table.slices tfoot td{padding:9px 13px;color:var(--ink-3);font-size:10.5px;
   table.hist tbody tr{grid-template-columns:minmax(0,1fr) auto auto auto;
     grid-template-areas:"time worker state state" "task task task task" "proj toks cost dur"}
   table.hist tbody .seg{display:none}
-  table.hist tbody td:nth-child(1){grid-area:time}
+  table.hist tbody td:nth-child(1){grid-area:time;white-space:normal;overflow-wrap:anywhere}
   table.hist tbody td:nth-child(2){grid-area:worker}
   table.hist tbody td:nth-child(3){grid-area:proj}
   table.hist tbody td:nth-child(4){grid-area:task}

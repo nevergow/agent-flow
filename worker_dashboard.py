@@ -551,6 +551,7 @@ tbody tr:hover{background:#FBF7EA}
 .b-hermes{color:#F2EEE3;background:#23242A}
 .b-sub{color:#B0472F;background:#F7E4DE}
 .b-codex{color:#157A5B;background:#DFF0E9}
+.b-claude{color:#9C2A6B;background:#F6E3EF}
 .b-cron{background:var(--amber-soft);color:var(--amber)}
 .pill{font-family:'PS2P',monospace;font-size:8px;padding:5px 7px 4px;border:1.5px solid currentColor;display:inline-block;white-space:nowrap}
 .p-run{color:var(--green);background:var(--green-soft)}
@@ -713,16 +714,18 @@ STATE_KEY = {"RUNNING": "st_run", "done": "st_done", "interrupted": "st_halt",
 def state_label(st):
     return T(STATE_KEY.get(st, "st_done"))
 PIXEL_WORKER = {"DSH": "b-dsh", "Pi": "b-pi", "Pi·rpc": "b-rpc",
-                "Hermes": "b-hermes", "Hermes·sub": "b-sub", "Codex": "b-codex"}
-WORKER_ORDER = ["DSH", "Pi", "Pi·rpc", "Hermes", "Hermes·sub", "Codex"]
+                "Hermes": "b-hermes", "Hermes·sub": "b-sub", "Codex": "b-codex", "Claude": "b-claude"}
+WORKER_ORDER = ["DSH", "Pi", "Pi·rpc", "Hermes", "Hermes·sub", "Codex", "Claude"]
 PIX_HERMES = "#3E4E66"
 PIX_SUB = "#B0472F"
 PIX_CODEX = "#157A5B"
+PIX_CLAUDE = "#9C2A6B"
 
 
 def worker_color(w):
     return {"DSH": PIX_DSH, "Pi": PIX_PI, "Pi·rpc": PIX_RPC,
-            "Hermes": PIX_HERMES, "Hermes·sub": PIX_SUB, "Codex": PIX_CODEX}.get(w, PIX_PI)
+            "Hermes": PIX_HERMES, "Hermes·sub": PIX_SUB, "Codex": PIX_CODEX,
+            "Claude": PIX_CLAUDE}.get(w, PIX_PI)
 
 
 def worker_badge(w):
@@ -1177,7 +1180,8 @@ def chart_network(recs, w=1040, h=560, n=12):
         y = wy[wk]
         col = worker_color(wk)
         tint = {"DSH": "#F0EBFA", "Pi": "#E4F1F2", "Pi·rpc": "#FBF0DE",
-                "Hermes": "#E6E6E2", "Hermes·sub": "#F7E4DE", "Codex": "#DFF0E9"}.get(wk, "#FFFCF3")
+                "Hermes": "#E6E6E2", "Hermes·sub": "#F7E4DE", "Codex": "#DFF0E9",
+                "Claude": "#F6E3EF"}.get(wk, "#FFFCF3")
         out.append(f'<g class="gn" data-nid="w:{e(wk)}">'
                    f'<rect x="{wx}" y="{y:.1f}" width="{ww}" height="28" fill="{tint}" stroke="{col}" stroke-width="2"/>'
                    f'<rect x="{wx}" y="{y:.1f}" width="5" height="28" fill="{col}"/>'
@@ -1238,7 +1242,7 @@ SLICE_VERDICT_KEY = {"pass": "vd_pass", "reject": "vd_reject",
                      "abort": "vd_abort", "na": "vd_na"}
 # 账本里的 executor 是小写；复用主看板的 badge 配色。
 SLICE_WORKER = {"dsh": "DSH", "pi": "Pi", "rpc": "Pi·rpc",
-                "subagent": "Hermes·sub", "codex": "Codex"}
+                "subagent": "Hermes·sub", "codex": "Codex", "claude": "Claude"}
 
 
 def _slice_pill(state):
@@ -1799,7 +1803,8 @@ def processes_panel(procs, recs):
         rec = by_pid.get(pr.get("pid"))
         # 进程自己的任务文本（ps/meta 给的）优先，其次才用会话标题
         task = clean_title(pr.get("task")) or (clean_title(rec.get("label")) if rec else "") or "—"
-        badge = {"DSH": "b-dsh", "Pi": "b-pi", "Pi·rpc": "b-rpc", "Codex": "b-rpc"}.get(pr["agent"], "b-pi")
+        badge = {"DSH": "b-dsh", "Pi": "b-pi", "Pi·rpc": "b-rpc", "Codex": "b-rpc",
+                 "Claude": "b-claude"}.get(pr["agent"], "b-pi")
         rows.append(
             f'<tr><td class="num t">{pr["pid"]}</td>'
             f'<td><span class="badge {badge}">{e(pr["agent"].upper())}</span></td>'
@@ -1884,7 +1889,7 @@ def render_pixel(recs, refresh, lang="zh", days=14, rows=20, graph_n=12, procs=N
   <div class="stat" title="{e(cost_today_tip)}">
     <div class="row1"><span class="k px">{T("kpi_cost")}</span>{sprite('coin')}</div>
     <div class="lcd"><div class="v px">≈¥{cny_today:.2f}</div></div>
-    <div class="c2"><span>DSH <b>¥{grp_today['DSH']:.2f}</b></span><span>Hermes <b>¥{grp_today['Hermes']:.2f}</b></span><span>Pi/Codex <b>¥{grp_today['Pi']:.2f}</b></span></div>
+    <div class="c2"><span>DSH <b>¥{grp_today['DSH']:.2f}</b></span><span>Hermes <b>¥{grp_today['Hermes']:.2f}</b></span><span>Pi/Codex/Claude <b>¥{grp_today['Pi']:.2f}</b></span></div>
     <div class="c2 dim">{T("k_cost_est")}</div>
   </div>
 </div>"""

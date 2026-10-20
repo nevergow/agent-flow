@@ -10,10 +10,12 @@
   Pi 一次性  ~/.pi/agent/sessions/<cwd-slug>/<ts>_<uuid>.jsonl
   Pi RPC     ~/.hermes/logs/pi-rpc-<name>.jsonl （pi_rpc.py 常驻会话的事件流）
   Pi RPC st  ~/.hermes/state/pi-rpc/<name>/     （会话是否还活着）
+  Claude     ~/.claude/projects/<cwd-slug>/<sessionId>.jsonl （Claude Code 会话）
+  Codex      ~/.codex/sessions/**/*.jsonl
 
 用法
 ====
-  worker_runs.py                     # 最近 20 条（DSH + Pi 一起）
+  worker_runs.py                     # 最近 20 条（全来源）
   worker_runs.py --worker dsh        # 只看 DSH / --worker pi 只看 Pi
   worker_runs.py --limit 50 --since 48h
   worker_runs.py show <KEY>          # 单条详情：任务书首段 + 工具调用时间线 + 最终回答
@@ -982,7 +984,153 @@ def scan_codex(days=7):
     return out
 
 
-ALL_WORKERS = ["dsh", "pi", "hermes", "codex"]
+# ------------------------------------------------------------------------ Claude
+
+CLAUDE_SESSIONS = os.path.join(HOME, ".claude", "projects")
+
+
+def _claude_text(content):
+    """user/assistant 的 message.content 可能是字符串，也可能是 block 数组。"""
+    if isinstance(content, str):
+        return content
+    return "\n".join(
+        (c.get("text") or "") for c in (content if isinstance(content, list) else [])
+        if isinstance(c, dict) and c.get("type") == "text"
+    )
+
+
+def _parse_claude(path):
+    """单个 Claude Code 会话文件 → rec。异常由 caller 兜（单文件失败只跳过它）。"""
+    rec = {
+        "worker": "Claude",
+        "kind": "claude",
+        "key": "",
+        "path": path,
+        "state": "?",
+        "tokens": 0,
+        "tok_in": 0,
+        "tok_out": 0,
+        "tok_cache": 0,
+        "cost_cny": 0.0,
+        "cost_usd": 0.0,
+        "title": "",
+        "task": "",
+        "label": "",
+        "last_text": "",
+        "model": "",
+        "cwd": "",
+        "created": 0.0,
+        "last": 0.0,
+        "tool_calls": [],
+        "tools": {},
+        "steps": 0,
+        "turns": 0,
+    }
+    session_id = ""
+    first_user = ""
+    ts_first = 0.0
+    ts_last = 0.0
+    times = []
+    usage = {}          # message.id → usage（同一 id 会重复出现，后者覆盖前者）
+    n = 0
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            n += 1
+            ts = _ms(e.get("timestamp"))
+            if ts:
+                ts_first = ts_first or ts
+                ts_last = ts if not ts_last else max(ts_last, ts)
+                times.append(ts)
+            if not session_id:
+                session_id = e.get("sessionId") or ""
+            if not rec["cwd"]:
+                rec["cwd"] = e.get("cwd") or ""
+            t = e.get("type")
+            msg = e.get("message") or {}
+            content = msg.get("content")
+            if t == "user":
+                rec["turns"] += 1
+                if not first_user:
+                    for ln in _claude_text(content).splitlines():
+                        ln = ln.strip()
+                        if ln and not ln.startswith("<"):   # 跳过系统注入块
+                            first_user = ln
+                            break
+            elif t == "assistant":
+                mid = msg.get("id") or e.get("uuid") or f"_n{n}"
+                usage[mid] = msg.get("usage") or {}
+                if msg.get("model"):
+                    rec["model"] = msg["model"]
+                txt = _claude_text(content)
+                if txt.strip():
+                    rec["last_text"] = txt[:400]
+                for c in content if isinstance(content, list) else []:
+                    if not isinstance(c, dict) or c.get("type") != "tool_use":
+                        continue
+                    name = c.get("name") or "?"
+                    rec["steps"] += 1
+                    rec["tools"][name] = rec["tools"].get(name, 0) + 1
+                    rec["tool_calls"].append(
+                        (ts, name, json.dumps(c.get("input"), ensure_ascii=False)[:160])
+                    )
+
+    for u in usage.values():
+        rec["tok_in"] += int(u.get("input_tokens") or 0)
+        rec["tok_out"] += int(u.get("output_tokens") or 0)
+        rec["tok_cache"] += int(u.get("cache_read_input_tokens") or 0)
+
+    rec["key"] = session_id or os.path.splitext(os.path.basename(path))[0]
+    rec["tokens"] = rec["tok_in"] + rec["tok_out"] + rec["tok_cache"]
+    rec["created"] = rec["start"] = ts_first or os.path.getmtime(path)
+    rec["last"] = rec["last_start"] = ts_last or rec["start"]
+    rec["state"] = "RUNNING" if time.time() - rec["last"] < 180 else "done"
+    rec["end"] = None if rec["state"] == "RUNNING" else rec["last"]
+    rec["project"] = os.path.basename(rec["cwd"].rstrip("/")) or "?"
+    label = _one_line(first_user, 60)
+    rec["title"] = rec["task"] = rec["label"] = label
+    rec["cost_cny"] = cost_cny_of(rec["tok_in"], rec["tok_out"], rec["tok_cache"], rec["start"])
+    rec["segs"] = activity_segments(times, running=rec["state"] == "RUNNING")
+    return rec
+
+
+def scan_claude(days=7, limit=60):
+    """Claude Code 会话（~/.claude/projects/*/*.jsonl）→ rec。
+
+    assistant 消息在流式/重放时会重复落盘（同一 message.id 出现 2-4 次），
+    usage 必须按 id 去重，每 id 只计一次，否则 token 会翻倍。
+    """
+    cut = time.time() - days * 86400
+    cands = []
+    for path in glob.glob(os.path.join(CLAUDE_SESSIONS, "*", "*.jsonl")):
+        try:
+            mt = os.path.getmtime(path)
+        except OSError:
+            continue
+        if mt >= cut:
+            cands.append((mt, path))
+    cands.sort(key=lambda x: x[0], reverse=True)
+    out = []
+    for _mt, path in cands[: limit * 3]:
+        try:
+            rec = _parse_claude(path)
+        except Exception:
+            continue        # 单文件失败不能拖垮整个扫描
+        if rec is not None:
+            if rec["tokens"] == 0 and rec["turns"] == 0:
+                continue        # 空会话（如 `claude --help` 留下的）不进看板
+            out.append(rec)
+    out.sort(key=lambda r: r["start"], reverse=True)
+    return out[:limit]
+
+
+ALL_WORKERS = ["dsh", "pi", "hermes", "codex", "claude"]
 
 
 def collect(workers=None):
@@ -998,6 +1146,8 @@ def collect(workers=None):
         recs += scan_hermes() + scan_hermes_subagents()
     if "codex" in workers:
         recs += scan_codex()
+    if "claude" in workers:
+        recs += scan_claude()
     seen, uniq = set(), []
     for r in recs:
         k = (r.get("kind"), r.get("key"))
@@ -1126,16 +1276,17 @@ def main():
         sys.stdout.reconfigure(line_buffering=True)
     except AttributeError:
         pass
-    ap = argparse.ArgumentParser(description="看 DSH / Pi 执行者在跑什么")
+    ap = argparse.ArgumentParser(description="看 DSH / Pi / Hermes / Codex / Claude 执行者在跑什么")
     ap.add_argument("cmd", nargs="?", default="list", choices=["list", "show", "follow"])
     ap.add_argument("key", nargs="?")
-    ap.add_argument("--worker", choices=["all", "dsh", "pi"], default="all")
+    ap.add_argument("--worker", choices=["all"] + ALL_WORKERS, default="all",
+                    help="只看某一类执行者；all = " + " / ".join(ALL_WORKERS))
     ap.add_argument("--limit", type=int, default=20)
     ap.add_argument("--since", default=None, help="如 24h / 3d")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
 
-    workers = {"dsh": ["dsh"], "pi": ["pi"], "all": ["dsh", "pi"]}[args.worker]
+    workers = {"all": ALL_WORKERS}.get(args.worker) or [args.worker]
     recs = collect(workers)
 
     if args.since:
